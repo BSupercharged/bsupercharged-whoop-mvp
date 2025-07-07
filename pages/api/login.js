@@ -1,10 +1,14 @@
 // pages/api/login.js
 
+const DEBUG = process.env.DEBUG === 'true';
+
 export default async function handler(req, res) {
   // 1. Extract the WhatsApp number from query string
   const { whatsapp } = req.query;
 
-  console.log('📥 Incoming login request with:', req.query);
+  if (DEBUG) {
+    console.log('📥 Incoming login request with:', req.query);
+  }
 
   // 2. Validate that we received the WhatsApp number
   if (!whatsapp) {
