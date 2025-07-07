@@ -1,12 +1,18 @@
-// /api/login.js
-export default async function handler(req, res) {
-  const { whatsapp } = req.query;
-  const state = encodeURIComponent(whatsapp || "anon" + Math.random().toString(36).slice(2, 10));
+export default function handler(req, res) {
+  const client_id = process.env.WHOOP_CLIENT_ID;
+  const redirect_uri = process.env.WHOOP_REDIRECT_URI;
+  const scope = "read:profile read:recovery read:sleep read:workout read:body_measurement";
+  const state = "bscWhoop1"; // must be at least 8 characters
 
-  const whoopOAuthUrl = `https://api.prod.whoop.com/oauth/oauth2/auth?client_id=${process.env.WHOOP_CLIENT_ID}` +
-    `&response_type=code&scope=read:profile read:recovery read:sleep read:workout read:body_measurement` +
-    `&redirect_uri=${encodeURIComponent(process.env.WHOOP_REDIRECT_URI)}` +
-    `&state=${state}`;
+  if (!client_id || !redirect_uri) {
+    return res.status(500).json({
+      error: "Missing WHOOP_CLIENT_ID or WHOOP_REDIRECT_URI in env"
+    });
+  }
 
-  res.redirect(whoopOAuthUrl);
+  const authUrl = `https://api.prod.whoop.com/oauth/oauth2/auth?client_id=${client_id}&redirect_uri=${encodeURIComponent(
+    redirect_uri
+  )}&response_type=code&scope=${encodeURIComponent(scope)}&state=${state}`;
+
+  res.status(200).json({ success: true, url: authUrl });
 }
