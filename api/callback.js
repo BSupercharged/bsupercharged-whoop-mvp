@@ -1,9 +1,4 @@
-
-/**
- * File: /api/callback.js
- * Purpose: Handles OAuth callback and stores WHOOP token with WhatsApp number
- */
-
+// /api/callback.js
 import { MongoClient } from 'mongodb';
 import fetch from 'node-fetch';
 
@@ -40,11 +35,18 @@ export default async function handler(req, res) {
     const db = mongoClient.db("whoop_mvp");
     const collection = db.collection("whoop_tokens");
 
-    await collection.insertOne({
-      whatsapp,
-      ...tokenData,
-      created_at: new Date()
-    });
+    await collection.updateOne(
+      { whatsapp },
+      {
+        $set: {
+          whatsapp,
+          ...tokenData,
+          created_at: new Date(),
+          expires_at: new Date(Date.now() + tokenData.expires_in * 1000)
+        }
+      },
+      { upsert: true }
+    );
 
     await mongoClient.close();
     res.redirect("https://wa.me/" + encodeURIComponent(whatsapp));
@@ -52,3 +54,4 @@ export default async function handler(req, res) {
     res.status(500).json({ error: "OAuth callback failed", debug: err.message });
   }
 }
+
