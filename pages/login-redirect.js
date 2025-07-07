@@ -2,11 +2,19 @@
 
 export async function getServerSideProps(context) {
   const { whatsapp } = context.query;
-  const encodedPhone = encodeURIComponent(whatsapp || '');
+
+  if (!whatsapp) {
+    return {
+      notFound: true,
+    };
+  }
+
+  const encodedPhone = encodeURIComponent(whatsapp);
+  const destination = `/api/login?whatsapp=${encodedPhone}`;
 
   return {
     redirect: {
-      destination: `/api/login?whatsapp=${encodedPhone}`,
+      destination,
       permanent: false,
     },
   };
@@ -15,3 +23,4 @@ export async function getServerSideProps(context) {
 export default function LoginRedirect() {
   return <p>Redirecting to WHOOP login...</p>;
 }
+
