@@ -4,6 +4,7 @@ import Twilio from 'twilio';
 import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
+  let mongoClient;
   try {
     const { Body, From } = req.body;
     const phone = From.replace("whatsapp:", ""); // e.g., +316...
@@ -11,7 +12,7 @@ export default async function handler(req, res) {
     console.log(`[WhatsApp] Incoming message from: ${From}`);
     console.log(`[WhatsApp] Message body: ${Body}`);
 
-    const mongoClient = new MongoClient(process.env.MONGODB_URI);
+    mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const tokens = db.collection("whoop_tokens");
@@ -25,7 +26,6 @@ export default async function handler(req, res) {
         `👋 To get started, connect your WHOOP account:\n👉 ${loginLink}`,
         From
       );
-      await mongoClient.close();
       return res.status(200).send("Login link sent");
     }
 
@@ -35,11 +35,12 @@ export default async function handler(req, res) {
     const message = await getGPTReply(gptPrompt);
 
     await sendWhatsApp(message, From);
-    await mongoClient.close();
-    res.status(200).send("Response sent");
+    return res.status(200).send("Response sent");
   } catch (err) {
     console.error("Error in WhatsApp handler:", err);
-    res.status(500).send("Internal error");
+    return res.status(500).send("Internal error");
+  } finally {
+    if (mongoClient) await mongoClient.close();
   }
 }
 

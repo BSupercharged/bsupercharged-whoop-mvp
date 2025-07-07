@@ -2,15 +2,15 @@ import { MongoClient } from 'mongodb';
 import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
+  let mongoClient;
   try {
-    const mongoClient = new MongoClient(process.env.MONGODB_URI);
+    mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const collection = db.collection("whoop_tokens");
 
     const latestToken = await collection.findOne({}, { sort: { _id: -1 } });
     if (!latestToken?.access_token) {
-      await mongoClient.close();
       return res.status(401).json({ success: false, error: "No access token found" });
     }
 
@@ -40,11 +40,12 @@ export default async function handler(req, res) {
       }
     }
 
-    await mongoClient.close();
-    res.status(200).json({ success: true, ...results });
+    return res.status(200).json({ success: true, ...results });
 
   } catch (err) {
-    res.status(500).json({ success: false, error: "Unexpected error", debug: err.message });
+    return res.status(500).json({ success: false, error: "Unexpected error", debug: err.message });
+  } finally {
+    if (mongoClient) await mongoClient.close();
   }
 }
 
