@@ -16,6 +16,7 @@ export default async function handler(req, res) {
   const client_secret = process.env.WHOOP_CLIENT_SECRET;
   const redirect_uri = process.env.WHOOP_REDIRECT_URI;
 
+  let mongoClient;
   try {
     // Exchange code for access token
     const tokenRes = await fetch("https://api.prod.whoop.com/oauth/oauth2/token", {
@@ -36,7 +37,7 @@ export default async function handler(req, res) {
     }
 
     // Store in MongoDB
-    const mongoClient = new MongoClient(process.env.MONGODB_URI);
+    mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const collection = db.collection("whoop_tokens");
@@ -54,13 +55,13 @@ export default async function handler(req, res) {
       { upsert: true }
     );
 
-    await mongoClient.close();
-
     // Redirect back to WhatsApp chat
-    res.redirect("https://wa.me/" + encodeURIComponent(whatsapp));
+    return res.redirect("https://wa.me/" + encodeURIComponent(whatsapp));
   } catch (err) {
     console.error("OAuth callback failed:", err);
-    res.status(500).json({ error: "OAuth callback failed", debug: err.message });
+    return res.status(500).json({ error: "OAuth callback failed", debug: err.message });
+  } finally {
+    if (mongoClient) await mongoClient.close();
   }
 }
 
