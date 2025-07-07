@@ -1,3 +1,8 @@
+/**
+ * File: /api/whatsapp.js
+ * Purpose: Handles WhatsApp messages and responds using WHOOP and OpenAI
+ */
+
 import { MongoClient } from 'mongodb';
 import { OpenAI } from 'openai';
 import Twilio from 'twilio';
@@ -15,25 +20,22 @@ export default async function handler(req, res) {
     const user = await tokens.findOne({ whatsapp: From });
 
     if (!user || !user.access_token) {
-      // Trigger login flow
-      const loginUrl = `${process.env.BASE_URL}/api/login?whatsapp=${encodeURIComponent(From)}`;
-      await sendWhatsApp(`Hi! Please log in to WHOOP so I can access your data:\n${loginUrl}`, From);
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${encodeURIComponent(From)}`;
+      await sendWhatsApp(`Hi! Please log in to WHOOP here:
+${loginLink}`, From);
       await mongoClient.close();
-      return res.status(200).send("Login prompt sent");
+      return res.status(200).send("Login link sent");
     }
 
-    // Get latest recovery data
     const recovery = await getLatestWhoopRecovery(user.access_token);
-    const message = await getGPTReply(
-      `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`
-    );
+    const message = await getGPTReply(`My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`);
 
     await sendWhatsApp(message, From);
     await mongoClient.close();
-    res.status(200).send("Message sent");
+    res.status(200).send("Response sent");
   } catch (err) {
-    console.error("Error in WhatsApp handler:", err.message);
-    res.status(500).send("Internal server error");
+    console.error("Error in WhatsApp handler:", err);
+    res.status(500).send("Internal error");
   }
 }
 
@@ -65,10 +67,8 @@ async function getLatestWhoopRecovery(token) {
       Accept: "application/json"
     }
   });
-
   if (!res.ok) throw new Error(`WHOOP API failed: ${res.status} - ${await res.text()}`);
   const json = await res.json();
-
   const latest = json.records?.[0]?.score || {};
   return {
     recovery_score: latest.recovery_score || 0,
