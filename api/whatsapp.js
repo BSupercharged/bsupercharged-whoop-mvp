@@ -88,7 +88,3 @@ async function getLatestWhoopRecovery(token) {
     spo2: latest.spo2_percentage || 0,
   };
 }
-
-
-
-
