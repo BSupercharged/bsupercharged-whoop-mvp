@@ -6,7 +6,7 @@ import fetch from 'node-fetch';
 export default async function handler(req, res) {
   try {
     const { Body, From } = req.body;
-    const phone = From.replace("whatsapp:", "");
+    const phone = From.replace("whatsapp:", ""); // e.g., +316...
 
     console.log(`[WhatsApp] Incoming message from: ${From}`);
     console.log(`[WhatsApp] Message body: ${Body}`);
@@ -19,9 +19,8 @@ export default async function handler(req, res) {
     const user = await tokens.findOne({ whatsapp: phone });
     console.log("[MongoDB] User found?", !!user);
 
-    // Not logged in
     if (!user || !user.access_token) {
-      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${encodeURIComponent(phone)}`;
       await sendWhatsApp(
         `👋 To get started, connect your WHOOP account:\n👉 ${loginLink}`,
         From
@@ -32,10 +31,8 @@ export default async function handler(req, res) {
 
     // Logged in, fetch recovery data
     const recovery = await getLatestWhoopRecovery(user.access_token);
-
-    const message = await getGPTReply(
-      `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?\nAlso: ${Body}`
-    );
+    const gptPrompt = `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. Give a concise summary and one recommendation.`;
+    const message = await getGPTReply(gptPrompt);
 
     await sendWhatsApp(message, From);
     await mongoClient.close();
@@ -54,26 +51,24 @@ async function getGPTReply(message) {
       {
         role: "system",
         content:
-          "You are a concise health assistant. Reply briefly based on WHOOP data and the user’s message. Limit to ~100 words unless essential.",
+          "You are a helpful health assistant. Interpret WHOOP metrics concisely and give 1 clear recommendation.",
       },
       { role: "user", content: message },
     ],
   });
-  return chat.choices[0].message.content.trim();
+
+  // Truncate to max 1600 characters
+  const fullText = chat.choices[0].message.content.trim();
+  return fullText.length > 1500 ? fullText.slice(0, 1490) + "..." : fullText;
 }
 
 async function sendWhatsApp(text, to) {
   const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  const maxLength = 1600;
-  const chunks = text.match(new RegExp(`.{1,${maxLength}}`, 'g'));
-
-  for (const chunk of chunks) {
-    await client.messages.create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to,
-      body: chunk
-    });
-  }
+  await client.messages.create({
+    from: process.env.TWILIO_WHATSAPP_NUMBER,
+    to,
+    body: text,
+  });
 }
 
 async function getLatestWhoopRecovery(token) {
@@ -93,6 +88,7 @@ async function getLatestWhoopRecovery(token) {
     spo2: latest.spo2_percentage || 0,
   };
 }
+
 
 
 
