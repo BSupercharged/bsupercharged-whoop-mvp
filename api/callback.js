@@ -1,4 +1,4 @@
-// File: /api/callback.js
+// /api/callback.js
 
 import { MongoClient } from 'mongodb';
 import fetch from 'node-fetch';
@@ -7,11 +7,9 @@ export default async function handler(req, res) {
   const code = req.query.code;
   const state = req.query.state;
 
-  const rawWhatsapp = new URLSearchParams(state).get("whatsapp");
-  const whatsapp = rawWhatsapp?.replace(/[^\d]/g, ""); // Digits only
-
+  const whatsapp = new URLSearchParams(state).get("whatsapp");
   if (!code || !whatsapp) {
-    return res.status(400).json({ error: "Missing code or WhatsApp number" });
+    return res.status(400).json({ error: "Missing code or invalid WhatsApp number" });
   }
 
   const client_id = process.env.WHOOP_CLIENT_ID;
@@ -19,7 +17,7 @@ export default async function handler(req, res) {
   const redirect_uri = process.env.WHOOP_REDIRECT_URI;
 
   try {
-    // Step 1: Exchange code for access_token
+    // Exchange code for access token
     const tokenRes = await fetch("https://api.prod.whoop.com/oauth/oauth2/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -32,14 +30,12 @@ export default async function handler(req, res) {
       }).toString()
     });
 
-    if (!tokenRes.ok) {
-      const errorText = await tokenRes.text();
-      return res.status(500).json({ error: "Token exchange failed", details: errorText });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) {
+      return res.status(500).json({ error: "Token exchange failed", debug: tokenData });
     }
 
-    const tokenData = await tokenRes.json();
-
-    // Step 2: Store token in MongoDB
+    // Store in MongoDB
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
@@ -60,12 +56,12 @@ export default async function handler(req, res) {
 
     await mongoClient.close();
 
-    // Step 3: Redirect back to WhatsApp chat
-    const redirectUrl = `https://wa.me/${whatsapp}`;
-    return res.redirect(redirectUrl);
+    // Redirect back to WhatsApp chat
+    res.redirect("https://wa.me/" + encodeURIComponent(whatsapp));
   } catch (err) {
     console.error("OAuth callback failed:", err);
-    return res.status(500).json({ error: "OAuth callback failed", debug: err.message });
+    res.status(500).json({ error: "OAuth callback failed", debug: err.message });
   }
 }
+
 
