@@ -1,54 +1,69 @@
-import axios from "axios";
 import { OpenAI } from "openai";
-import { MongoClient } from "mongodb";
 import Twilio from "twilio";
 
 export default async function handler(req, res) {
   const { Body, From } = req.body;
 
-  const whoopData = await getLatestWhoopSleep();
-  const responseText = await getGPTReply(Body || "How was my sleep?", whoopData);
+  try {
+    const latestSleep = await getLatestWhoopSleep();
+    const gptReply = await getGPTReply(Body || "How was my sleep?", latestSleep);
 
-  await sendWhatsApp(responseText, From);
-  res.status(200).send("OK");
+    await sendWhatsApp(gptReply, From);
+    res.status(200).send("OK");
+  } catch (err) {
+    console.error("Error in WhatsApp handler:", err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
 }
 
 async function getLatestWhoopSleep() {
-  const client = new MongoClient(process.env.MONGODB_URI);
+  const mongoUrl = process.env.MONGODB_URI;
+  const { MongoClient } = await import("mongodb");
+  const client = new MongoClient(mongoUrl);
   await client.connect();
-  const db = client.db("whoop_mvp");
-  const tokenCol = db.collection("whoop_tokens");
 
-  const tokenDoc = await tokenCol.findOne({}, { sort: { _id: -1 } });
-  const accessToken = tokenDoc?.access_token;
-  if (!accessToken) return null;
+  const tokenCollection = client.db("whoop_mvp").collection("whoop_tokens");
+  const latest = await tokenCollection.findOne({}, { sort: { _id: -1 } });
+  await client.close();
 
-  const res = await fetch("https://api.prod.whoop.com/developer/v1/recovery", {
+  if (!latest?.access_token) throw new Error("No access token found");
+
+  const whoopRes = await fetch("https://api.prod.whoop.com/developer/v1/sleep", {
     headers: {
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${latest.access_token}`,
       Accept: "application/json"
     }
   });
 
-  const recoveryData = await res.json();
-  const today = recoveryData.records?.[0]?.score || null;
+  const rawText = await whoopRes.text();
+  if (!whoopRes.ok) throw new Error(`WHOOP API failed: ${whoopRes.status} - ${rawText}`);
 
-  await client.close();
-  return today;
+  let data;
+  try {
+    data = JSON.parse(rawText);
+  } catch {
+    throw new Error(`Invalid JSON from WHOOP: ${rawText}`);
+  }
+
+  const latestSleep = data?.records?.[0];
+  if (!latestSleep) throw new Error("No sleep data found");
+  return latestSleep;
 }
 
-async function getGPTReply(userMessage, sleepData) {
+async function getGPTReply(userInput, sleepData) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-  const sleepSummary = sleepData
-    ? `Recovery score: ${sleepData.recovery_score}, RHR: ${sleepData.resting_heart_rate}, HRV: ${sleepData.hrv_rmssd_milli.toFixed(1)}ms, SpO2: ${sleepData.spo2_percentage}%, Skin Temp: ${sleepData.skin_temp_celsius}°C`
-    : "No WHOOP data available.";
 
   const chat = await openai.chat.completions.create({
     model: "gpt-4o",
     messages: [
-      { role: "system", content: "You're a health coach using WHOOP metrics to guide user wellness." },
-      { role: "user", content: `${userMessage}\n\nLatest WHOOP recovery data:\n${sleepSummary}` }
+      {
+        role: "system",
+        content: "You are a concise AI health coach. Use WHOOP recovery and sleep data to reply helpfully and clearly."
+      },
+      {
+        role: "user",
+        content: `User asked: "${userInput}". Here is their latest sleep data:\n\n${JSON.stringify(sleepData, null, 2)}`
+      }
     ]
   });
 
