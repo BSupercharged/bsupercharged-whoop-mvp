@@ -6,7 +6,7 @@ import fetch from 'node-fetch';
 export default async function handler(req, res) {
   try {
     const { Body, From } = req.body;
-    const phone = From.replace(/\D/g, ""); // Digits only e.g., "31610451196"
+    const phone = From.replace("whatsapp:", "");
 
     console.log(`[WhatsApp] Incoming message from: ${From}`);
     console.log(`[WhatsApp] Message body: ${Body}`);
@@ -19,6 +19,7 @@ export default async function handler(req, res) {
     const user = await tokens.findOne({ whatsapp: phone });
     console.log("[MongoDB] User found?", !!user);
 
+    // Not logged in
     if (!user || !user.access_token) {
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
@@ -29,9 +30,11 @@ export default async function handler(req, res) {
       return res.status(200).send("Login link sent");
     }
 
+    // Logged in, fetch recovery data
     const recovery = await getLatestWhoopRecovery(user.access_token);
+
     const message = await getGPTReply(
-      `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`
+      `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?\nAlso: ${Body}`
     );
 
     await sendWhatsApp(message, From);
@@ -50,7 +53,8 @@ async function getGPTReply(message) {
     messages: [
       {
         role: "system",
-        content: "You are a helpful health assistant and biohacker. Interpret WHOOP metrics & blood results and other health metrics concisely and give recommendations in 1500 characters or less.",
+        content:
+          "You are a concise health assistant. Reply briefly based on WHOOP data and the user’s message. Limit to ~100 words unless essential.",
       },
       { role: "user", content: message },
     ],
@@ -60,11 +64,16 @@ async function getGPTReply(message) {
 
 async function sendWhatsApp(text, to) {
   const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  await client.messages.create({
-    from: process.env.TWILIO_WHATSAPP_NUMBER,
-    to,
-    body: text,
-  });
+  const maxLength = 1600;
+  const chunks = text.match(new RegExp(`.{1,${maxLength}}`, 'g'));
+
+  for (const chunk of chunks) {
+    await client.messages.create({
+      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      to,
+      body: chunk
+    });
+  }
 }
 
 async function getLatestWhoopRecovery(token) {
@@ -84,5 +93,6 @@ async function getLatestWhoopRecovery(token) {
     spo2: latest.spo2_percentage || 0,
   };
 }
+
 
 
