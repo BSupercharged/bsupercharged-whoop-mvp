@@ -11,6 +11,7 @@ export default async function handler(req, res) {
   if (!code || !whatsapp) {
     return res.status(400).json({ error: "Missing code or invalid WhatsApp number" });
   }
+  const phoneOnly = whatsapp.startsWith('+') ? whatsapp.slice(1) : whatsapp;
 
   const client_id = process.env.WHOOP_CLIENT_ID;
   const client_secret = process.env.WHOOP_CLIENT_SECRET;
@@ -57,7 +58,7 @@ export default async function handler(req, res) {
     await mongoClient.close();
 
     // Redirect back to WhatsApp chat
-    res.redirect("https://wa.me/" + encodeURIComponent(whatsapp));
+    res.redirect(`https://wa.me/${phoneOnly}`);
   } catch (err) {
     console.error("OAuth callback failed:", err);
     res.status(500).json({ error: "OAuth callback failed", debug: err.message });

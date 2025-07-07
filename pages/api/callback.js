@@ -10,6 +10,7 @@ export default async function handler(req, res) {
   // Extract phone number from state (format: "whatsapp=+316xxxxxxx")
   const params = new URLSearchParams(state);
   const whatsapp = params.get('whatsapp');
+  const phoneOnly = whatsapp && whatsapp.startsWith('+') ? whatsapp.slice(1) : whatsapp;
 
   if (!whatsapp) {
     return res.status(400).json({ error: 'Missing WhatsApp number' });
@@ -39,7 +40,8 @@ export default async function handler(req, res) {
     // Save token for this user
     await storeTokenForUser(whatsapp, tokenData);
 
-    res.status(200).json({ success: true });
+    // Redirect back to WhatsApp chat
+    res.redirect(`https://wa.me/${phoneOnly}`);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Callback handler error' });
