@@ -7,6 +7,6 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Missing code in query' });
   }
 
-  // For now just log or return the code for debugging
+  // Temporarily log code for debugging
   return res.status(200).json({ success: true, code, state });
 }
