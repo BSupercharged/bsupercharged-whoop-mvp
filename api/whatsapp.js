@@ -6,7 +6,7 @@ import fetch from 'node-fetch';
 export default async function handler(req, res) {
   try {
     const { Body, From } = req.body;
-    const phone = From.replace("whatsapp:", "");
+    const phone = From.replace(/\D/g, ""); // Digits only e.g., "31610451196"
 
     console.log(`[WhatsApp] Incoming message from: ${From}`);
     console.log(`[WhatsApp] Message body: ${Body}`);
@@ -19,7 +19,6 @@ export default async function handler(req, res) {
     const user = await tokens.findOne({ whatsapp: phone });
     console.log("[MongoDB] User found?", !!user);
 
-    // Not logged in
     if (!user || !user.access_token) {
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
@@ -30,9 +29,7 @@ export default async function handler(req, res) {
       return res.status(200).send("Login link sent");
     }
 
-    // Logged in, fetch recovery data
     const recovery = await getLatestWhoopRecovery(user.access_token);
-
     const message = await getGPTReply(
       `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`
     );
@@ -53,8 +50,7 @@ async function getGPTReply(message) {
     messages: [
       {
         role: "system",
-        content:
-          "You are a helpful health assistant. Interpret WHOOP metrics concisely and give recommendations.",
+        content: "You are a helpful health assistant. Interpret WHOOP metrics concisely and give recommendations.",
       },
       { role: "user", content: message },
     ],
