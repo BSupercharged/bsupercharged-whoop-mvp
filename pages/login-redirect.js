@@ -1,3 +1,5 @@
+// pages/login-redirect.js
+
 export async function getServerSideProps(context) {
   const { whatsapp } = context.query;
   const encodedPhone = encodeURIComponent(whatsapp || '');
