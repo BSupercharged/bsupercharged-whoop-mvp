@@ -16,6 +16,14 @@ export default async function handler(req, res) {
   const redirect_uri = process.env.WHOOP_REDIRECT_URI;
   const mongo_uri = process.env.MONGODB_URI;
 
+  let debugInfo = {
+    receivedCode: code,
+    client_id,
+    client_secret: client_secret ? "[REDACTED - PRESENT]" : "[MISSING]",
+    redirect_uri,
+    mongo_uri: mongo_uri ? "[REDACTED - PRESENT]" : "[MISSING]",
+  };
+
   try {
     const response = await fetch("https://api.prod.whoop.com/oauth/oauth2/token", {
       method: "POST",
@@ -31,27 +39,17 @@ export default async function handler(req, res) {
       }).toString(),
     });
 
+    debugInfo.status = response.status;
+    debugInfo.ok = response.ok;
+    debugInfo.headers = Object.fromEntries(response.headers.entries());
     const text = await response.text();
+    debugInfo.rawResponse = text;
 
-    // Log raw response if status is not ok
-    if (!response.ok) {
-      return res.status(response.status).json({
-        success: false,
-        error: `Token request failed`,
-        status: response.status,
-        body: text,
-      });
-    }
-
-    let tokenData;
+    let tokenData = {};
     try {
       tokenData = JSON.parse(text);
-    } catch (parseError) {
-      return res.status(500).json({
-        success: false,
-        error: "Failed to parse token response",
-        raw: text,
-      });
+    } catch (parseErr) {
+      debugInfo.parseError = parseErr.message;
     }
 
     const mongoClient = new MongoClient(mongo_uri);
@@ -62,21 +60,21 @@ export default async function handler(req, res) {
     const result = await collection.insertOne(tokenData);
     await mongoClient.close();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       tokenData,
       mongo_id: result.insertedId,
+      debug: debugInfo,
     });
   } catch (err) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      error: "Something went wrong",
-      debug: err.message,
-      stack: err.stack,
-      env: {
-    client_id,
-    redirect_uri,
-    hasSecret: !!client_secret
+      error: "Exception thrown",
+      debug: {
+        ...debugInfo,
+        err: err.message,
+        stack: err.stack,
+      },
     });
   }
 }
