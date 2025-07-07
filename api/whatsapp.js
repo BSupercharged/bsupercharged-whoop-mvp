@@ -3,7 +3,7 @@
 import axios from "axios";
 import { OpenAI } from "openai";
 import Twilio from "twilio";
-import clientPromise from "@/lib/mongodb";
+import clientPromise from "mongodb";
 
 export default async function handler(req, res) {
   const { Body, From, NumMedia } = req.body;
