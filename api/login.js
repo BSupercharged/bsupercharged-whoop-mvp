@@ -1,5 +1,4 @@
 // /api/login.js
-
 export default async function handler(req, res) {
   const { whatsapp } = req.query;
 
@@ -9,16 +8,18 @@ export default async function handler(req, res) {
 
   const state = `whatsapp=${encodeURIComponent(whatsapp)}`;
   const redirectUri = encodeURIComponent(process.env.WHOOP_REDIRECT_URI);
+  const clientId = process.env.WHOOP_CLIENT_ID;
 
-  const url =
+  const authUrl =
     `https://api.prod.whoop.com/oauth/oauth2/auth` +
     `?response_type=code` +
-    `&client_id=${process.env.WHOOP_CLIENT_ID}` +
+    `&client_id=${clientId}` +
     `&redirect_uri=${redirectUri}` +
     `&scope=read:profile read:recovery read:sleep read:workout read:body_measurement` +
     `&state=${state}`;
 
-  res.status(200).json({ url });
+  // 🔁 THIS is the fix — redirect instead of return JSON:
+  res.redirect(authUrl);
 }
 
 
