@@ -8,29 +8,43 @@ export default async function handler(req, res) {
     const db = mongoClient.db("whoop_mvp");
     const collection = db.collection("whoop_tokens");
 
-    // Fetch the most recent token (last inserted)
+    // Get the latest stored token
     const latestToken = await collection.findOne({}, { sort: { _id: -1 } });
 
-    if (!latestToken || !latestToken.access_token) {
+    if (!latestToken?.access_token) {
       await mongoClient.close();
-      return res.status(401).json({ success: false, error: "No valid access token found" });
+      return res.status(401).json({ success: false, error: "No access token found" });
     }
 
     const response = await fetch("https://api.prod.whoop.com/users/profile", {
+      method: "GET",
       headers: {
-        Authorization: `Bearer ${latestToken.access_token}`
+        Authorization: `Bearer ${latestToken.access_token}`,
+        Accept: "application/json"
       }
     });
 
-    const data = await response.json();
-    await mongoClient.close();
+    const text = await response.text();
 
+    // Try to parse JSON, else throw the raw error
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        error: "Non-JSON response from WHOOP",
+        raw: text
+      });
+    }
+
+    await mongoClient.close();
     res.status(200).json({ success: true, profile: data });
 
   } catch (err) {
     res.status(500).json({
       success: false,
-      error: "Failed to fetch WHOOP profile",
+      error: "Fetch failed",
       debug: err.message
     });
   }
