@@ -73,6 +73,10 @@ export default async function handler(req, res) {
       error: "Something went wrong",
       debug: err.message,
       stack: err.stack,
+      env: {
+    client_id,
+    redirect_uri,
+    hasSecret: !!client_secret
     });
   }
 }
