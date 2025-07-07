@@ -1,18 +1,18 @@
 export default function handler(req, res) {
-  const client_id = process.env.WHOOP_CLIENT_ID;
-  const redirect_uri = process.env.WHOOP_REDIRECT_URI;
-  const scope = "read:profile read:recovery read:sleep read:workout read:body_measurement";
-  const state = "bscWhoop1"; // must be at least 8 characters
+  const { whatsapp } = req.query;
 
-  if (!client_id || !redirect_uri) {
-    return res.status(500).json({
-      error: "Missing WHOOP_CLIENT_ID or WHOOP_REDIRECT_URI in env"
-    });
+  if (!whatsapp || whatsapp.length < 8) {
+    return res.status(400).json({ error: "Missing or invalid WhatsApp number" });
   }
 
-  const authUrl = `https://api.prod.whoop.com/oauth/oauth2/auth?client_id=${client_id}&redirect_uri=${encodeURIComponent(
-    redirect_uri
-  )}&response_type=code&scope=${encodeURIComponent(scope)}&state=${state}`;
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: process.env.WHOOP_CLIENT_ID,
+    redirect_uri: process.env.WHOOP_REDIRECT_URI,
+    scope: "read:profile read:recovery read:sleep read:workout read:body_measurement",
+    state: whatsapp // this links the token back to the user's WhatsApp
+  });
 
-  res.status(200).json({ success: true, url: authUrl });
+  const url = `https://join.whoop.com/oauth/oauth2/auth?${params.toString()}`;
+  res.status(200).json({ url });
 }
