@@ -3,13 +3,17 @@ import { OpenAI } from 'openai';
 import Twilio from 'twilio';
 import fetch from 'node-fetch';
 
+const DEBUG = process.env.DEBUG === 'true';
+
 export default async function handler(req, res) {
   try {
     const { Body, From } = req.body;
     const phone = From.replace("whatsapp:", ""); // e.g., +316...
 
-    console.log(`[WhatsApp] Incoming message from: ${From}`);
-    console.log(`[WhatsApp] Message body: ${Body}`);
+    if (DEBUG) {
+      console.log(`[WhatsApp] Incoming message from: ${From}`);
+      console.log(`[WhatsApp] Message body: ${Body}`);
+    }
 
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
@@ -17,7 +21,9 @@ export default async function handler(req, res) {
     const tokens = db.collection("whoop_tokens");
 
     const user = await tokens.findOne({ whatsapp: phone });
-    console.log("[MongoDB] User found?", !!user);
+    if (DEBUG) {
+      console.log("[MongoDB] User found?", !!user);
+    }
 
     if (!user || !user.access_token) {
       const loginLink = `${process.env.BASE_URL}/login-redirect?whatsapp=${encodeURIComponent(phone)}`;
