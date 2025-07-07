@@ -1,8 +1,3 @@
-/**
- * File: /api/whatsapp.js
- * Purpose: Handles WhatsApp messages and responds using WHOOP and OpenAI
- */
-
 import { MongoClient } from 'mongodb';
 import { OpenAI } from 'openai';
 import Twilio from 'twilio';
@@ -11,24 +6,30 @@ import fetch from 'node-fetch';
 export default async function handler(req, res) {
   try {
     const { Body, From } = req.body;
+
+    console.log("[WhatsApp] Incoming message from:", From);
+    console.log("[WhatsApp] Message body:", Body);
+
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const tokens = db.collection("whoop_tokens");
 
-    // Find user by WhatsApp number
     const user = await tokens.findOne({ whatsapp: From });
+    console.log("[MongoDB] User found?", !!user);
 
     if (!user || !user.access_token) {
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${encodeURIComponent(From)}`;
-      await sendWhatsApp(`Hi! Please log in to WHOOP here:
-${loginLink}`, From);
+      await sendWhatsApp(`Hi! To continue, please log in to WHOOP here:\n${loginLink}`, From);
       await mongoClient.close();
       return res.status(200).send("Login link sent");
     }
 
     const recovery = await getLatestWhoopRecovery(user.access_token);
-    const message = await getGPTReply(`My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`);
+
+    const message = await getGPTReply(
+      `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`
+    );
 
     await sendWhatsApp(message, From);
     await mongoClient.close();
@@ -52,12 +53,17 @@ async function getGPTReply(message) {
 }
 
 async function sendWhatsApp(text, to) {
-  const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  await client.messages.create({
-    from: process.env.TWILIO_WHATSAPP_NUMBER,
-    to,
-    body: text
-  });
+  try {
+    const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+    const result = await client.messages.create({
+      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      to,
+      body: text
+    });
+    console.log("[Twilio] Message sent:", result.sid);
+  } catch (err) {
+    console.error("[Twilio] Failed to send message:", err.message);
+  }
 }
 
 async function getLatestWhoopRecovery(token) {
@@ -67,9 +73,15 @@ async function getLatestWhoopRecovery(token) {
       Accept: "application/json"
     }
   });
-  if (!res.ok) throw new Error(`WHOOP API failed: ${res.status} - ${await res.text()}`);
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`WHOOP API failed: ${res.status} - ${errorText}`);
+  }
+
   const json = await res.json();
   const latest = json.records?.[0]?.score || {};
+
   return {
     recovery_score: latest.recovery_score || 0,
     hrv: latest.hrv_rmssd_milli || 0,
@@ -77,3 +89,4 @@ async function getLatestWhoopRecovery(token) {
     spo2: latest.spo2_percentage || 0
   };
 }
+
