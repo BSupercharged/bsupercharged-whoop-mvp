@@ -1,95 +1,47 @@
-import { MongoClient } from 'mongodb';
-import fetch from 'node-fetch';
+import { storeTokenForUser } from '../../lib/db';
 
 export default async function handler(req, res) {
-  const code = req.query.code;
-  const state = req.query.state;
+  const { code, state } = req.query;
 
-  // Debug log: what is state on entry?
-  console.log("[DEBUG] Received state:", state);
-  console.log("[DEBUG] Received code:", code);
-
-  // Robustly extract WhatsApp number regardless of encoding
-  let whatsapp = "";
-  if (typeof state === "string" && state.startsWith("whatsapp=")) {
-    const rawValue = state.split("=")[1];
-    whatsapp = decodeURIComponent(rawValue);
+  if (!code || !state) {
+    return res.status(400).json({ error: 'Missing code or state' });
   }
 
-  // Debug log: what is parsed whatsapp?
-  console.log("[DEBUG] Parsed WhatsApp:", whatsapp);
+  // Extract phone number from state (format: "whatsapp=+316xxxxxxx")
+  const params = new URLSearchParams(state);
+  const whatsapp = params.get('whatsapp');
 
-  if (!code || !whatsapp) {
-    console.error("[ERROR] Missing code or invalid WhatsApp number", { code, state, whatsapp });
-    return res.status(400).json({ error: "Missing code or invalid WhatsApp number", debug: { code, state, whatsapp } });
+  if (!whatsapp) {
+    return res.status(400).json({ error: 'Missing WhatsApp number' });
   }
-
-  const client_id = process.env.WHOOP_CLIENT_ID;
-  const client_secret = process.env.WHOOP_CLIENT_SECRET;
-  const redirect_uri = process.env.WHOOP_REDIRECT_URI;
 
   try {
-    // Exchange code for token
-    const tokenRes = await fetch("https://api.prod.whoop.com/oauth/oauth2/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    // Exchange code for access token from WHOOP
+    const tokenRes = await fetch('https://api.prod.whoop.com/oauth/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${Buffer.from(`${process.env.WHOOP_CLIENT_ID}:${process.env.WHOOP_CLIENT_SECRET}`).toString('base64')}`,
+      },
       body: new URLSearchParams({
         code,
-        grant_type: "authorization_code",
-        client_id,
-        client_secret,
-        redirect_uri
-      }).toString()
+        grant_type: 'authorization_code',
+        redirect_uri: `${process.env.NEXT_PUBLIC_BASE_URL}/api/callback`,
+      }),
     });
 
-    // Debug log: token exchange response
-    const tokenText = await tokenRes.text();
-    console.log("[DEBUG] Raw token response:", tokenText);
+    const tokenData = await tokenRes.json();
 
-    let tokenData;
-    try {
-      tokenData = JSON.parse(tokenText);
-    } catch (err) {
-      console.error("[ERROR] Could not parse token response", tokenText);
-      return res.status(500).json({ error: "Failed to parse token response", raw: tokenText });
+    if (!tokenRes.ok) {
+      return res.status(400).json({ error: 'Token exchange failed', details: tokenData });
     }
 
-    if (!tokenData.access_token) {
-      console.error("[ERROR] Token exchange failed", tokenData);
-      return res.status(500).json({ error: "Token exchange failed", debug: tokenData });
-    }
+    // Save token for this user
+    await storeTokenForUser(whatsapp, tokenData);
 
-    // Store in MongoDB
-    const mongoClient = new MongoClient(process.env.MONGODB_URI);
-    await mongoClient.connect();
-    const db = mongoClient.db("whoop_mvp");
-    const collection = db.collection("whoop_tokens");
-
-    const updateResult = await collection.updateOne(
-      { whatsapp },
-      {
-        $set: {
-          whatsapp,
-          ...tokenData,
-          created_at: new Date(),
-          expires_at: new Date(Date.now() + (tokenData.expires_in || 3600) * 1000)
-        }
-      },
-      { upsert: true }
-    );
-
-    // Debug log: Mongo result
-    console.log("[DEBUG] Mongo update result:", updateResult);
-
-    await mongoClient.close();
-
-    // Debug log: final redirect
-    const redirectUrl = `/login-redirect-success?whatsapp=${encodeURIComponent(whatsapp)}`;
-    console.log("[DEBUG] Redirecting to:", redirectUrl);
-
-    res.redirect(redirectUrl);
+    res.status(200).json({ success: true });
   } catch (err) {
-    console.error("[ERROR] OAuth callback failed:", err);
-    return res.status(500).json({ error: "OAuth callback failed", debug: err.message });
+    console.error(err);
+    res.status(500).json({ error: 'Callback handler error' });
   }
 }
