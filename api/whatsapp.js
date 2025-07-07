@@ -1,33 +1,32 @@
-import { MongoClient } from "mongodb";
-import { OpenAI } from "openai";
-import Twilio from "twilio";
-import fetch from "node-fetch";
+import { MongoClient } from 'mongodb';
+import { OpenAI } from 'openai';
+import Twilio from 'twilio';
+import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
   try {
     const { Body, From } = req.body;
-
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
-    await mongoClient.connect(); // ✅ important
+    await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const tokens = db.collection("whoop_tokens");
 
-    // Match user by WhatsApp number
+    // Find user by WhatsApp number
     const user = await tokens.findOne({ whatsapp: From });
 
     if (!user || !user.access_token) {
-      // Trigger WHOOP login if token not found
-      const loginRes = await fetch(`${process.env.BASE_URL}/api/login`);
-      const { url } = await loginRes.json();
-      await sendWhatsApp(`Hi! Please log in to WHOOP so I can access your data:\n${url}`, From);
+      // Trigger login flow
+      const loginUrl = `${process.env.BASE_URL}/api/login?whatsapp=${encodeURIComponent(From)}`;
+      await sendWhatsApp(`Hi! Please log in to WHOOP so I can access your data:\n${loginUrl}`, From);
       await mongoClient.close();
       return res.status(200).send("Login prompt sent");
     }
 
-    // Get WHOOP recovery data
+    // Get latest recovery data
     const recovery = await getLatestWhoopRecovery(user.access_token);
-    const gptPrompt = `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`;
-    const message = await getGPTReply(gptPrompt);
+    const message = await getGPTReply(
+      `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`
+    );
 
     await sendWhatsApp(message, From);
     await mongoClient.close();
