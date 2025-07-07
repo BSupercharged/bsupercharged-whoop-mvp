@@ -8,6 +8,7 @@ export default async function handler(req, res) {
     const db = mongoClient.db("whoop_mvp");
     const collection = db.collection("whoop_tokens");
 
+    // Get the latest stored token
     const latestToken = await collection.findOne({}, { sort: { _id: -1 } });
 
     if (!latestToken?.access_token) {
@@ -15,7 +16,7 @@ export default async function handler(req, res) {
       return res.status(401).json({ success: false, error: "No access token found" });
     }
 
-    const response = await fetch("https://api.prod.whoop.com/v1/user/profile", {
+    const response = await fetch("https://api.prod.whoop.com/developer/v1/user/profile", {
       method: "GET",
       headers: {
         Authorization: `Bearer ${latestToken.access_token}`,
@@ -24,7 +25,6 @@ export default async function handler(req, res) {
     });
 
     const text = await response.text();
-
     let data;
     try {
       data = JSON.parse(text);
@@ -37,7 +37,7 @@ export default async function handler(req, res) {
     }
 
     await mongoClient.close();
-    res.status(200).json({ success: true, profile: data, debug: { status: response.status, headers: Object.fromEntries(response.headers.entries()) } });
+    res.status(200).json({ success: true, profile: data });
 
   } catch (err) {
     res.status(500).json({
@@ -47,3 +47,4 @@ export default async function handler(req, res) {
     });
   }
 }
+
