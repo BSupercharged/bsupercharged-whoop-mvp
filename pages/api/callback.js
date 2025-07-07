@@ -1,45 +1,28 @@
-export default async function handler(req, res) {
-  const { code, state } = req.query;
-
-  console.log('🔁 Raw query:', req.query);
-  console.log('🔁 Raw state:', state);
-
-  if (!code || !state) {
-    return res.status(400).json({ error: 'Missing code or state' });
-  }
-
-  const decodedState = decodeURIComponent(state);
-  console.log('🔓 Decoded state:', decodedState);
-
-  const whatsapp = decodedState.replace(/^whatsapp=/, '');
-  console.log('📲 Extracted WhatsApp:', whatsapp);
-
-  if (!whatsapp) {
-    return res.status(400).json({ error: 'Missing WhatsApp number in state' });
-  }
-
-  // continue...
-}// pages/api/callback.js
+// pages/api/callback.js
 
 import { MongoClient } from 'mongodb';
 
 export default async function handler(req, res) {
   const { code, state } = req.query;
 
+  console.log('🔁 WHOOP Callback query:', req.query);
+
   if (!code || !state) {
     return res.status(400).json({ error: 'Missing code or state' });
   }
 
-  // ✅ Decode and extract WhatsApp number
-  const decodedState = decodeURIComponent(state); // e.g. "whatsapp=+31610451196"
-  const whatsapp = decodedState.replace(/^whatsapp=/, '');
-
-  if (!whatsapp) {
-    return res.status(400).json({ error: 'Missing WhatsApp number in state' });
-  }
-
   try {
-    // ✅ Step 1: Exchange code for access token
+    // ✅ Robust decoding of state (e.g., "whatsapp=%2B31610451196")
+    const parsedState = Object.fromEntries(new URLSearchParams(decodeURIComponent(state)));
+    const whatsapp = parsedState.whatsapp;
+
+    console.log('📲 Extracted WhatsApp from state:', whatsapp);
+
+    if (!whatsapp) {
+      return res.status(400).json({ error: 'Missing WhatsApp number in state' });
+    }
+
+    // ✅ Exchange the code for an access token
     const tokenRes = await fetch('https://api.prod.whoop.com/oauth/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -59,7 +42,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Failed to exchange code for token', details: tokenData });
     }
 
-    // ✅ Step 2: Save to MongoDB
+    // ✅ Store tokens in MongoDB by WhatsApp number
     const mongoClient = await MongoClient.connect(process.env.MONGODB_URI);
     const db = mongoClient.db('whoop');
     const users = db.collection('users');
@@ -84,10 +67,9 @@ export default async function handler(req, res) {
 
     console.log(`✅ Stored WHOOP token for ${whatsapp}`);
 
-    // ✅ Final response to user
-    res.status(200).send('✅ WHOOP account successfully connected. You can now return to WhatsApp!');
+    return res.status(200).send('✅ WHOOP connected. You can now return to WhatsApp.');
   } catch (err) {
     console.error('❌ Callback error:', err);
-    res.status(500).json({ error: 'Internal server error', details: err.message });
+    return res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 }
