@@ -1,12 +1,24 @@
-import { MongoClient } from "mongodb";
-import fetch from "node-fetch";
+
+/**
+ * File: /api/callback.js
+ * Purpose: Handles OAuth callback and stores WHOOP token with WhatsApp number
+ */
+
+import { MongoClient } from 'mongodb';
+import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
-  const { code, state: whatsapp } = req.query;
+  const code = req.query.code;
+  const state = req.query.state;
 
+  const whatsapp = new URLSearchParams(state).get("whatsapp");
   if (!code || !whatsapp) {
-    return res.status(400).json({ error: "Missing code or WhatsApp number" });
+    return res.status(400).json({ error: "Missing code or invalid WhatsApp number" });
   }
+
+  const client_id = process.env.WHOOP_CLIENT_ID;
+  const client_secret = process.env.WHOOP_CLIENT_SECRET;
+  const redirect_uri = process.env.WHOOP_REDIRECT_URI;
 
   try {
     const tokenRes = await fetch("https://api.prod.whoop.com/oauth/oauth2/token", {
@@ -15,34 +27,28 @@ export default async function handler(req, res) {
       body: new URLSearchParams({
         code,
         grant_type: "authorization_code",
-        client_id: process.env.WHOOP_CLIENT_ID,
-        client_secret: process.env.WHOOP_CLIENT_SECRET,
-        redirect_uri: process.env.WHOOP_REDIRECT_URI
-      })
+        client_id,
+        client_secret,
+        redirect_uri
+      }).toString()
     });
 
     const tokenData = await tokenRes.json();
-
-    if (!tokenData.access_token) {
-      return res.status(401).json({ error: "Failed to retrieve token", raw: tokenData });
-    }
 
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const collection = db.collection("whoop_tokens");
 
-    // Overwrite any existing entry for this user
-    await collection.updateOne(
-      { whatsapp },
-      { $set: { ...tokenData, whatsapp, updated_at: new Date() } },
-      { upsert: true }
-    );
+    await collection.insertOne({
+      whatsapp,
+      ...tokenData,
+      created_at: new Date()
+    });
 
     await mongoClient.close();
-
-    res.status(200).send("✅ WHOOP login successful. You can return to WhatsApp and ask about your recovery.");
+    res.redirect("https://wa.me/" + encodeURIComponent(whatsapp));
   } catch (err) {
-    res.status(500).json({ error: "OAuth callback error", debug: err.message });
+    res.status(500).json({ error: "OAuth callback failed", debug: err.message });
   }
 }
