@@ -1,28 +1,26 @@
-// pages/api/callback.js
-
 import { MongoClient } from 'mongodb';
 
 export default async function handler(req, res) {
   const { code, state } = req.query;
 
-  console.log('🔁 WHOOP Callback query:', req.query);
+  console.log('🟡 WHOOP callback received:', req.query);
 
   if (!code || !state) {
     return res.status(400).json({ error: 'Missing code or state' });
   }
 
   try {
-    // ✅ Robust decoding of state (e.g., "whatsapp=%2B31610451196")
-    const parsedState = Object.fromEntries(new URLSearchParams(decodeURIComponent(state)));
-    const whatsapp = parsedState.whatsapp;
+    // ✅ Don't decode — state is already decoded
+    const stateParams = new URLSearchParams(state);
+    const whatsapp = stateParams.get('whatsapp');
 
-    console.log('📲 Extracted WhatsApp from state:', whatsapp);
+    console.log('📲 WhatsApp in state:', whatsapp);
 
     if (!whatsapp) {
       return res.status(400).json({ error: 'Missing WhatsApp number in state' });
     }
 
-    // ✅ Exchange the code for an access token
+    // ✅ Exchange WHOOP code for token
     const tokenRes = await fetch('https://api.prod.whoop.com/oauth/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -39,10 +37,10 @@ export default async function handler(req, res) {
 
     if (!tokenRes.ok) {
       console.error('❌ Token exchange failed:', tokenData);
-      return res.status(500).json({ error: 'Failed to exchange code for token', details: tokenData });
+      return res.status(500).json({ error: 'Token exchange failed', details: tokenData });
     }
 
-    // ✅ Store tokens in MongoDB by WhatsApp number
+    // ✅ Save token to MongoDB
     const mongoClient = await MongoClient.connect(process.env.MONGODB_URI);
     const db = mongoClient.db('whoop');
     const users = db.collection('users');
@@ -65,11 +63,11 @@ export default async function handler(req, res) {
 
     await mongoClient.close();
 
-    console.log(`✅ Stored WHOOP token for ${whatsapp}`);
+    console.log(`✅ WHOOP token stored for ${whatsapp}`);
 
-    return res.status(200).send('✅ WHOOP connected. You can now return to WhatsApp.');
+    return res.status(200).send('✅ WHOOP account connected. You can now return to WhatsApp!');
   } catch (err) {
     console.error('❌ Callback error:', err);
-    return res.status(500).json({ error: 'Internal server error', details: err.message });
+    return res.status(500).json({ error: 'Callback failure', details: err.message });
   }
 }
