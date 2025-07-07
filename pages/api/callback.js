@@ -1,64 +1,62 @@
-// /pages/api/callback.js
 import { MongoClient } from 'mongodb';
-import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
-  const code = req.query.code;
-  const state = req.query.state;
+  const { code, state } = req.query;
 
-  const whatsapp = new URLSearchParams(state).get("whatsapp");
-  if (!code || !whatsapp) {
-    return res.status(400).json({ error: "Missing code or invalid WhatsApp number" });
+  if (!code || !state) {
+    return res.status(400).json({ error: 'Missing code or state' });
   }
 
-  const client_id = process.env.WHOOP_CLIENT_ID;
-  const client_secret = process.env.WHOOP_CLIENT_SECRET;
-  const redirect_uri = process.env.WHOOP_REDIRECT_URI;
-
   try {
-    // Exchange code for access token
-    const tokenRes = await fetch("https://api.prod.whoop.com/oauth/oauth2/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    // Step 1: Exchange code for token
+    const tokenRes = await fetch('https://api.prod.whoop.com/oauth/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
       body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: process.env.WHOOP_CLIENT_ID,
+        client_secret: process.env.WHOOP_CLIENT_SECRET,
         code,
-        grant_type: "authorization_code",
-        client_id,
-        client_secret,
-        redirect_uri
-      }).toString()
+        redirect_uri: process.env.WHOOP_REDIRECT_URI,
+      }),
     });
 
     const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) {
-      return res.status(500).json({ error: "Token exchange failed", debug: tokenData });
+
+    if (!tokenRes.ok) {
+      console.error('Token exchange error:', tokenData);
+      return res.status(500).json({ error: 'Token exchange failed', details: tokenData });
     }
 
-    // Store in MongoDB
-    const mongoClient = new MongoClient(process.env.MONGODB_URI);
-    await mongoClient.connect();
-    const db = mongoClient.db("whoop_mvp");
-    const collection = db.collection("whoop_tokens");
+    // Step 2: Store token using WhatsApp number
+    const whatsapp = state.replace(/^whatsapp=/, '');
+    const mongoClient = await MongoClient.connect(process.env.MONGODB_URI);
+    const db = mongoClient.db('whoop');
+    const users = db.collection('users');
 
-    await collection.updateOne(
+    await users.updateOne(
       { whatsapp },
       {
         $set: {
           whatsapp,
-          ...tokenData,
-          created_at: new Date(),
-          expires_at: new Date(Date.now() + tokenData.expires_in * 1000)
-        }
+          access_token: tokenData.access_token,
+          refresh_token: tokenData.refresh_token,
+          expires_in: tokenData.expires_in,
+          scope: tokenData.scope,
+          token_type: tokenData.token_type,
+          updated_at: new Date(),
+        },
       },
       { upsert: true }
     );
 
-    await mongoClient.close();
+    mongoClient.close();
 
-    // ✅ Redirect to static success page
-    return res.redirect(`/login-redirect-success`);
+    return res.status(200).send('✅ WHOOP connected! You can now return to WhatsApp.');
   } catch (err) {
-    console.error("OAuth callback failed:", err);
-    return res.status(500).json({ error: "OAuth callback failed", debug: err.message });
+    console.error('Callback error:', err);
+    return res.status(500).json({ error: 'Callback failed', details: err.message });
   }
 }
