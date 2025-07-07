@@ -8,7 +8,6 @@ export default async function handler(req, res) {
     const db = mongoClient.db("whoop_mvp");
     const collection = db.collection("whoop_tokens");
 
-    // Get the latest stored token
     const latestToken = await collection.findOne({}, { sort: { _id: -1 } });
 
     if (!latestToken?.access_token) {
@@ -26,7 +25,6 @@ export default async function handler(req, res) {
 
     const text = await response.text();
 
-    // Try to parse JSON, else throw the raw error
     let data;
     try {
       data = JSON.parse(text);
@@ -39,7 +37,7 @@ export default async function handler(req, res) {
     }
 
     await mongoClient.close();
-    res.status(200).json({ success: true, profile: data });
+    res.status(200).json({ success: true, profile: data, debug: { status: response.status, headers: Object.fromEntries(response.headers.entries()) } });
 
   } catch (err) {
     res.status(500).json({
