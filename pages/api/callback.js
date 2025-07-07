@@ -1,4 +1,25 @@
-// pages/api/callback.js
+export default async function handler(req, res) {
+  const { code, state } = req.query;
+
+  console.log('🔁 Raw query:', req.query);
+  console.log('🔁 Raw state:', state);
+
+  if (!code || !state) {
+    return res.status(400).json({ error: 'Missing code or state' });
+  }
+
+  const decodedState = decodeURIComponent(state);
+  console.log('🔓 Decoded state:', decodedState);
+
+  const whatsapp = decodedState.replace(/^whatsapp=/, '');
+  console.log('📲 Extracted WhatsApp:', whatsapp);
+
+  if (!whatsapp) {
+    return res.status(400).json({ error: 'Missing WhatsApp number in state' });
+  }
+
+  // continue...
+}// pages/api/callback.js
 
 import { MongoClient } from 'mongodb';
 
