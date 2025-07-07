@@ -15,7 +15,7 @@ export default async function handler(req, res) {
       return res.status(401).json({ success: false, error: "No access token found" });
     }
 
-    const response = await fetch("https://api.prod.whoop.com/users/profile", {
+    const response = await fetch("https://api.prod.whoop.com/v1/user/profile", {
       method: "GET",
       headers: {
         Authorization: `Bearer ${latestToken.access_token}`,
