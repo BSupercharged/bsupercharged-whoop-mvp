@@ -1,4 +1,5 @@
 import { storeTokenForUser } from '../../lib/db';
+import { sanitizePhoneNumber } from '../../lib/phone.js';
 
 export default async function handler(req, res) {
   const { code, state } = req.query;
@@ -9,7 +10,7 @@ export default async function handler(req, res) {
 
   // Extract phone number from state (format: "whatsapp=+316xxxxxxx")
   const params = new URLSearchParams(state);
-  const whatsapp = params.get('whatsapp');
+  const whatsapp = sanitizePhoneNumber(params.get('whatsapp'));
 
   if (!whatsapp) {
     return res.status(400).json({ error: 'Missing WhatsApp number' });

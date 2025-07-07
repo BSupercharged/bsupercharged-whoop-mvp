@@ -14,7 +14,13 @@
     "react-dom": "^18.2.0"
   },
   "scripts": {
-    "start": "vercel dev"
+    "start": "vercel dev",
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "jest": {
+    "testEnvironment": "node"
   }
 }
-
