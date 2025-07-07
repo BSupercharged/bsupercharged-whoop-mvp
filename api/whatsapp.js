@@ -1,71 +1,80 @@
-// whatsapp.js
-
-import axios from "axios";
+import { MongoClient } from "mongodb";
 import { OpenAI } from "openai";
 import Twilio from "twilio";
-import clientPromise from "mongodb";
+import fetch from "node-fetch";
 
 export default async function handler(req, res) {
-  const { Body, From, NumMedia } = req.body;
-
   try {
-    const mongoClient = await clientPromise;
+    const { Body, From } = req.body;
+
+    const mongoClient = new MongoClient(process.env.MONGODB_URI);
+    await mongoClient.connect(); // ✅ important
     const db = mongoClient.db("whoop_mvp");
     const tokens = db.collection("whoop_tokens");
 
-    const userToken = await tokens.findOne({ phone_number: From });
+    // Match user by WhatsApp number
+    const user = await tokens.findOne({ whatsapp: From });
 
-    if (!userToken || isTokenExpired(userToken)) {
-      const loginURL = `${process.env.VERCEL_URL}/api/login?phone=${encodeURIComponent(From)}`;
-      await sendWhatsApp(`Please log in to WHOOP to link your data: ${loginURL}`, From);
-      return res.status(200).send("Login link sent");
+    if (!user || !user.access_token) {
+      // Trigger WHOOP login if token not found
+      const loginRes = await fetch(`${process.env.BASE_URL}/api/login`);
+      const { url } = await loginRes.json();
+      await sendWhatsApp(`Hi! Please log in to WHOOP so I can access your data:\n${url}`, From);
+      await mongoClient.close();
+      return res.status(200).send("Login prompt sent");
     }
 
-    const responseText = await getGPTReply(Body || "How was my sleep?", userToken.access_token);
-    await sendWhatsApp(responseText, From);
-    res.status(200).send("OK");
-  } catch (error) {
-    console.error("Error in WhatsApp handler:", error);
-    await sendWhatsApp("⚠️ Something went wrong. Please try again later.", From);
-    res.status(500).send("Error");
+    // Get WHOOP recovery data
+    const recovery = await getLatestWhoopRecovery(user.access_token);
+    const gptPrompt = `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`;
+    const message = await getGPTReply(gptPrompt);
+
+    await sendWhatsApp(message, From);
+    await mongoClient.close();
+    res.status(200).send("Message sent");
+  } catch (err) {
+    console.error("Error in WhatsApp handler:", err.message);
+    res.status(500).send("Internal server error");
   }
 }
 
-function isTokenExpired(tokenDoc) {
-  const now = Math.floor(Date.now() / 1000);
-  return !tokenDoc.expires_in || now >= tokenDoc.expires_in;
-}
-
-async function getGPTReply(message, accessToken) {
+async function getGPTReply(message) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-  // Get latest WHOOP data
-  const whoopRes = await fetch("https://api.prod.whoop.com/developer/v1/recovery/latest", {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-
-  if (!whoopRes.ok) throw new Error(`WHOOP API failed: ${whoopRes.status} - ${await whoopRes.text()}`);
-  const whoopData = await whoopRes.json();
-
-  const prompt = `You are a health coach. Use this user's recovery data to answer: "${message}"
-Recovery score: ${whoopData.recovery_score}
-Resting HR: ${whoopData.resting_heart_rate}
-HRV: ${whoopData.hrv_rmssd_milli}
-SpO2: ${whoopData.spo2_percentage}
-Skin temp: ${whoopData.skin_temp_celsius}`;
-
   const chat = await openai.chat.completions.create({
     model: "gpt-4o",
     messages: [
-      { role: "system", content: "You are a concise but helpful health coach." },
-      { role: "user", content: prompt },
-    ],
+      { role: "system", content: "You are a health coach. Reply concisely based on WHOOP health metrics." },
+      { role: "user", content: message }
+    ]
   });
-
   return chat.choices[0].message.content.trim();
 }
 
 async function sendWhatsApp(text, to) {
   const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  await client.messages.create({ from: process.env.TWILIO_WHATSAPP_NUMBER, to, body: text });
+  await client.messages.create({
+    from: process.env.TWILIO_WHATSAPP_NUMBER,
+    to,
+    body: text
+  });
+}
+
+async function getLatestWhoopRecovery(token) {
+  const res = await fetch("https://api.prod.whoop.com/developer/v1/recovery", {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json"
+    }
+  });
+
+  if (!res.ok) throw new Error(`WHOOP API failed: ${res.status} - ${await res.text()}`);
+  const json = await res.json();
+
+  const latest = json.records?.[0]?.score || {};
+  return {
+    recovery_score: latest.recovery_score || 0,
+    hrv: latest.hrv_rmssd_milli || 0,
+    rhr: latest.resting_heart_rate || 0,
+    spo2: latest.spo2_percentage || 0
+  };
 }
