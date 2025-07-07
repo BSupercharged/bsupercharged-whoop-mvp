@@ -1,77 +1,76 @@
 import { MongoClient } from "mongodb";
+import { OpenAI } from "openai";
 import Twilio from "twilio";
+import fetch from "node-fetch";
 
 export default async function handler(req, res) {
   const { Body, From } = req.body;
 
   try {
-    const userPhone = From;
-
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
-    const tokens = db.collection("whoop_tokens");
+    const users = db.collection("whoop_tokens");
 
-    const userToken = await tokens.findOne({ phone: userPhone });
-    if (!userToken || !userToken.access_token) {
-      await mongoClient.close();
-      return res.status(401).json({ success: false, error: "WHOOP access token not found for this number." });
+    // Identify user by WhatsApp number
+    const user = await users.findOne({ whatsapp: From }, { sort: { _id: -1 } });
+
+    if (!user || !user.access_token) {
+      const loginLink = `https://bsupercharged-whoop-mvp.vercel.app/api/login?whatsapp=${encodeURIComponent(From)}`;
+      await sendWhatsApp(`👋 To get started, please log in to WHOOP here:\n\n${loginLink}`, From);
+      return res.status(200).send("Login prompt sent");
     }
 
-    const response = await fetch("https://api.prod.whoop.com/developer/v1/recovery", {
+    // Fetch latest WHOOP recovery data
+    const whoopRes = await fetch("https://api.prod.whoop.com/developer/v1/user/recovery/latest", {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${userToken.access_token}`,
+        Authorization: `Bearer ${user.access_token}`,
         Accept: "application/json"
-      }
+      },
+      timeout: 10000 // 10 second timeout
     });
 
-    const data = await response.json();
+    if (!whoopRes.ok) {
+      if (whoopRes.status === 401) {
+        const reloginLink = `https://bsupercharged-whoop-mvp.vercel.app/api/login?whatsapp=${encodeURIComponent(From)}`;
+        await sendWhatsApp(`🔐 Your WHOOP session expired. Please log in again:\n\n${reloginLink}`, From);
+        return res.status(200).send("Relogin prompt sent");
+      }
 
-    if (!data.records || !data.records.length) {
-      await mongoClient.close();
-      return res.status(404).json({ success: false, error: "No recovery data found." });
+      const raw = await whoopRes.text();
+      throw new Error(`WHOOP API failed: ${whoopRes.status} - ${raw}`);
     }
 
-    const latest = data.records[0].score;
-    const reply = generateRecoveryAdvice(latest);
-    await mongoClient.close();
+    const recoveryData = await whoopRes.json();
+    const prompt = `
+Based on this WHOOP recovery data:
+- Recovery score: ${recoveryData.score.recovery_score}
+- RHR: ${recoveryData.score.resting_heart_rate}
+- HRV: ${recoveryData.score.hrv_rmssd_milli}
+- Skin temp: ${recoveryData.score.skin_temp_celsius.toFixed(1)}°C
+- SpO2: ${recoveryData.score.spo2_percentage.toFixed(1)}%
 
-    await sendWhatsApp(reply, userPhone);
-    res.status(200).send("OK");
+Provide a concise health tip to improve recovery and sleep.`;
+
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const chat = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        { role: "system", content: "You are a health coach. Reply concisely based on WHOOP data." },
+        { role: "user", content: prompt }
+      ]
+    });
+
+    const reply = chat.choices[0].message.content.trim();
+    await sendWhatsApp(reply, From);
+    await mongoClient.close();
+    res.status(200).send("Reply sent");
   } catch (err) {
     console.error("Error in WhatsApp handler:", err.message);
-    res.status(500).json({ success: false, error: "Internal server error" });
+    await sendWhatsApp("⚠️ Something went wrong. Please try again later.", req.body?.From || "");
+    res.status(500).json({ success: false, error: err.message });
   }
-}
-
-function generateRecoveryAdvice(score) {
-  const { recovery_score, resting_heart_rate, hrv_rmssd_milli, skin_temp_celsius, spo2_percentage } = score;
-
-  let insights = `📊 *Recovery Summary*\n`;
-  insights += `• Recovery Score: ${recovery_score}/100\n`;
-  insights += `• Resting HR: ${resting_heart_rate} bpm\n`;
-  insights += `• HRV: ${Math.round(hrv_rmssd_milli)} ms\n`;
-  insights += `• Skin Temp: ${skin_temp_celsius.toFixed(1)}°C\n`;
-  insights += `• SpO₂: ${spo2_percentage.toFixed(1)}%\n\n`;
-
-  let advice = `🛌 *Sleep & Recovery Tips*\n`;
-
-  if (recovery_score < 60) {
-    advice += `• Try 300mg magnesium glycinate from Bonowellness before bed\n`;
-    advice += `• Wind down 1h before sleep (no screens, dim lights)\n`;
-  }
-
-  if (hrv_rmssd_milli < 60) {
-    advice += `• Box breathing: 4-4-4-4 (inhale-hold-exhale-hold)\n`;
-    advice += `• Limit alcohol & processed food after 6pm\n`;
-  }
-
-  if (resting_heart_rate > 50) {
-    advice += `• Avoid heavy meals late\n• Stay hydrated during the day\n`;
-  }
-
-  return insights + advice;
 }
 
 async function sendWhatsApp(text, to) {
