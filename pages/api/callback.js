@@ -8,8 +8,12 @@ export default async function handler(req, res) {
   }
 
   // Extract phone number from state (format: "whatsapp=+316xxxxxxx")
-  const params = new URLSearchParams(state);
-  const whatsapp = params.get('whatsapp');
+  let whatsapp = new URLSearchParams(state).get('whatsapp');
+  if (!whatsapp) {
+    try {
+      whatsapp = new URLSearchParams(decodeURIComponent(state)).get('whatsapp');
+    } catch {}
+  }
 
   if (!whatsapp) {
     return res.status(400).json({ error: 'Missing WhatsApp number' });
@@ -39,7 +43,8 @@ export default async function handler(req, res) {
     // Save token for this user
     await storeTokenForUser(whatsapp, tokenData);
 
-    res.status(200).json({ success: true });
+    const phoneOnly = whatsapp.replace(/[^+\d]/g, '');
+    res.redirect(`https://wa.me/${phoneOnly}`);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Callback handler error' });

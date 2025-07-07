@@ -7,7 +7,14 @@ export default async function handler(req, res) {
   const code = req.query.code;
   const state = req.query.state;
 
-  const whatsapp = new URLSearchParams(state).get("whatsapp");
+  // Attempt to parse WhatsApp number from state, supporting double encoding
+  let whatsapp = state ? new URLSearchParams(state).get("whatsapp") : null;
+  if (!whatsapp) {
+    try {
+      whatsapp = new URLSearchParams(decodeURIComponent(state)).get("whatsapp");
+    } catch {}
+  }
+
   if (!code || !whatsapp) {
     return res.status(400).json({ error: "Missing code or invalid WhatsApp number" });
   }
@@ -57,7 +64,8 @@ export default async function handler(req, res) {
     await mongoClient.close();
 
     // Redirect back to WhatsApp chat
-    res.redirect("https://wa.me/" + encodeURIComponent(whatsapp));
+    const phoneOnly = whatsapp.replace(/[^+\d]/g, "");
+    res.redirect(`https://wa.me/${phoneOnly}`);
   } catch (err) {
     console.error("OAuth callback failed:", err);
     res.status(500).json({ error: "OAuth callback failed", debug: err.message });
