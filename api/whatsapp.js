@@ -37,7 +37,7 @@ async function getGPTReply(message, token) {
   const chat = await openai.chat.completions.create({
     model: "gpt-4o",
     messages: [
-      { role: "system", content: "You are a health coach. Reply concisely using WHOOP recovery and sleep data." },
+      { role: "system", content: "You are a health coach and biohacker. Reply concisely using WHOOP strain, recovery and sleep data. List any foods or supplements that may help this user." },
       { role: "user", content: `Message: ${message}\nData: ${JSON.stringify(sleep)}` }
     ]
   });
