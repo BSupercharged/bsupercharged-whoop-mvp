@@ -6,7 +6,7 @@ export async function getServerSideProps(context) {
 
   return {
     redirect: {
-      destination: `/api/login?whatsapp=${encodeURIComponent(whatsapp || '')}`,
+      destination: `/api/login?whatsapp=${encodedPhone}`,
       permanent: false,
     },
   };
