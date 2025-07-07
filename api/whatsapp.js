@@ -1,7 +1,6 @@
 import { MongoClient } from 'mongodb';
 import { OpenAI } from 'openai';
 import Twilio from 'twilio';
-import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
   try {
