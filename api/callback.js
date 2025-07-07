@@ -3,10 +3,9 @@ import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
   const code = req.query.code;
-  const whatsapp = req.query.state; // WhatsApp number passed as state param
 
-  if (!code || !whatsapp) {
-    return res.status(400).json({ success: false, error: "Missing code or WhatsApp number" });
+  if (!code) {
+    return res.status(400).json({ success: false, error: "Missing code in request" });
   }
 
   const client_id = process.env.WHOOP_CLIENT_ID;
@@ -26,26 +25,49 @@ export default async function handler(req, res) {
       }).toString()
     });
 
-    const tokenData = await response.json();
-    if (!tokenData.access_token) {
-      throw new Error("Failed to retrieve access token");
+    const text = await response.text();
+    let tokenData;
+
+    try {
+      tokenData = JSON.parse(text);
+    } catch (jsonErr) {
+      throw new Error(`Failed to parse response: ${text}`);
     }
+
+    if (!tokenData.access_token) {
+      return res.status(500).json({
+        success: false,
+        error: "WHOOP did not return an access token",
+        debug: tokenData
+      });
+    }
+
+    // Add expiry timestamp for easier token management
+    tokenData.expires_at = Date.now() + (tokenData.expires_in * 1000);
 
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const collection = db.collection("whoop_tokens");
 
-    // Upsert token with whatsapp number
-    await collection.updateOne(
-      { whatsapp },
-      { $set: { ...tokenData, whatsapp } },
-      { upsert: true }
-    );
+    // Associate token with user if phone available (multi-user support ready)
+    if (req.query.phone) {
+      tokenData.phone = req.query.phone;
+    }
 
+    const result = await collection.insertOne(tokenData);
     await mongoClient.close();
-    res.status(200).json({ success: true, tokenData });
+
+    res.status(200).json({
+      success: true,
+      tokenData,
+      mongo_id: result.insertedId
+    });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({
+      success: false,
+      error: "Something went wrong during WHOOP token exchange",
+      debug: err.message
+    });
   }
 }
