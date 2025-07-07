@@ -17,7 +17,7 @@ export default async function handler(req, res) {
 
     if (!user || !user.access_token || !user.expires_at || new Date(user.expires_at) < new Date()) {
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${encodeURIComponent(From)}`;
-      await sendWhatsApp(`👋 Hi! Please log in to WHOOP here:\n${loginLink}`, From);
+      await sendWhatsApp(`👋 To get started, connect your WHOOP account:\n👉 ${loginLink}`, From);
       await mongoClient.close();
       return res.status(200).send("Login link sent");
     }
