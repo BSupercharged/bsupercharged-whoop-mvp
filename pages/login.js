@@ -19,6 +19,11 @@ export default function Login() {
             window.location.href = data.url;
           }
         });
+      // The /api/login endpoint responds with an HTTP redirect. The previous
+      // implementation attempted to `fetch` the endpoint and parse JSON, which
+      // fails because the response body is empty. Instead, directly navigate the
+      // browser to the API route so the redirect is handled natively.
+      window.location.href = `/api/login?whatsapp=${encodeURIComponent(whatsapp)}`;
     }
   }, [whatsapp]);
 
