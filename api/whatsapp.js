@@ -20,7 +20,7 @@ export default async function handler(req, res) {
     console.log("[MongoDB] User found?", !!user);
 
     if (!user || !user.access_token) {
-      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${encodeURIComponent(phone)}`;
+      const loginLink = `${process.env.BASE_URL}/api/login-redirect?whatsapp=${encodeURIComponent(phone)}`;
       await sendWhatsApp(
         `👋 To get started, connect your WHOOP account:\n👉 ${loginLink}`,
         From
