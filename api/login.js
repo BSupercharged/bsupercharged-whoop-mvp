@@ -1,28 +1,23 @@
-/**
- * File: /api/login.js
- * Purpose: Redirects the user to WHOOP OAuth with the WhatsApp number embedded in `state`
- */
+// File: /pages/login.js
 
-export default async function handler(req, res) {
-  const { whatsapp } = req.query;
+import { useEffect } from 'react';
+import { useRouter } from 'next/router';
 
-  if (!whatsapp) {
-    return res.status(400).json({ error: "Missing WhatsApp number" });
-  }
+export default function LoginRedirect() {
+  const router = useRouter();
+  const { whatsapp } = router.query;
 
-  const state = encodeURIComponent(`whatsapp=${whatsapp}`);
+  useEffect(() => {
+    if (whatsapp) {
+      const encoded = encodeURIComponent(whatsapp);
+      window.location.href = `/api/login?whatsapp=${encoded}`;
+    }
+  }, [whatsapp]);
 
-  const url =
-    `https://api.prod.whoop.com/oauth/oauth2/auth` +
-    `?response_type=code` +
-    `&client_id=${process.env.WHOOP_CLIENT_ID}` +
-    `&redirect_uri=${encodeURIComponent(process.env.WHOOP_REDIRECT_URI)}` +
-    `&scope=read:profile read:recovery read:sleep read:workout read:body_measurement` +
-    `&state=${state}`;
-
-  // Optional: return JSON for testing in browser
-  // res.status(200).json({ url });
-
-  // ✅ Redirect directly to WHOOP login
-  res.redirect(url);
+  return (
+    <div style={{ padding: '2rem', fontFamily: 'sans-serif', textAlign: 'center' }}>
+      <h2>Connecting to WHOOP...</h2>
+      <p>Please wait while we redirect you to authorize your WHOOP account.</p>
+    </div>
+  );
 }
