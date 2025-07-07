@@ -55,10 +55,8 @@ export default async function handler(req, res) {
 
     await mongoClient.close();
 
-    // ✅ Redirect back to WhatsApp using correct format
-    const phoneOnly = whatsapp.replace("whatsapp:", "");
-    return res.redirect(`https://wa.me/${phoneOnly}`);
-    // Alternative fallback: res.redirect("/login-redirect-success"); (create this if needed)
+    // ✅ Redirect to static success page
+    return res.redirect(`/login-redirect-success`);
   } catch (err) {
     console.error("OAuth callback failed:", err);
     return res.status(500).json({ error: "OAuth callback failed", debug: err.message });
