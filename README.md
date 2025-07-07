@@ -8,6 +8,7 @@ This is a Vercel-ready backend that connects WHOOP health data with GPT-generate
 - GPT-4o-based analysis
 - WhatsApp delivery via Twilio Sandbox
 - MongoDB user and token storage
+- Multiuser login
 
 ## Setup
 1. Clone the repo and run `npm install`
