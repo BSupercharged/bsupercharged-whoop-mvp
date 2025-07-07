@@ -2,11 +2,12 @@ import { MongoClient } from 'mongodb';
 import { OpenAI } from 'openai';
 import Twilio from 'twilio';
 import fetch from 'node-fetch';
+import { sanitizePhoneNumber } from '../lib/phone.js';
 
 export default async function handler(req, res) {
   try {
     const { Body, From } = req.body;
-    const phone = From.replace("whatsapp:", ""); // e.g., +316...
+    const phone = sanitizePhoneNumber(From);
 
     console.log(`[WhatsApp] Incoming message from: ${From}`);
     console.log(`[WhatsApp] Message body: ${Body}`);

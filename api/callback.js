@@ -2,12 +2,13 @@
 
 import { MongoClient } from 'mongodb';
 import fetch from 'node-fetch';
+import { sanitizePhoneNumber } from '../lib/phone.js';
 
 export default async function handler(req, res) {
   const code = req.query.code;
   const state = req.query.state;
 
-  const whatsapp = new URLSearchParams(state).get("whatsapp");
+  const whatsapp = sanitizePhoneNumber(new URLSearchParams(state).get("whatsapp"));
   if (!code || !whatsapp) {
     return res.status(400).json({ error: "Missing code or invalid WhatsApp number" });
   }

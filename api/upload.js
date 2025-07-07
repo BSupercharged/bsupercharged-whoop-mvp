@@ -3,6 +3,7 @@ import formidable from "formidable";
 import fs from "fs";
 import { MongoClient } from "mongodb";
 import { createWorker } from "tesseract.js";
+import { sanitizePhoneNumber } from "../lib/phone.js";
 
 export const config = {
   api: {
@@ -17,7 +18,7 @@ export default async function handler(req, res) {
     if (err) return res.status(500).json({ error: "Upload error" });
 
     const file = files.file[0];
-    const phone = fields.phone?.[0] || "unknown";
+    const phone = sanitizePhoneNumber(fields.phone?.[0] || "unknown");
     const fileBuffer = fs.readFileSync(file.filepath);
 
     // Save original PDF as base64 in MongoDB
