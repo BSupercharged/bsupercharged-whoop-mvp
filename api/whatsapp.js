@@ -50,7 +50,7 @@ async function getGPTReply(message) {
     messages: [
       {
         role: "system",
-        content: "You are a helpful health assistant. Interpret WHOOP metrics concisely and give recommendations.",
+        content: "You are a helpful health assistant and biohacker. Interpret WHOOP metrics & blood results and other health metrics concisely and give recommendations in 1600 characters or less.",
       },
       { role: "user", content: message },
     ],
