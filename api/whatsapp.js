@@ -6,19 +6,18 @@ import fetch from 'node-fetch';
 export default async function handler(req, res) {
   try {
     const { Body, From } = req.body;
-    // Get last 9 digits for matching
-    const phone = From.replace(/[^\d]/g, '').slice(-9);
+    const phone = From.replace("whatsapp:", "");
 
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const tokens = db.collection("whoop_tokens");
 
-    const user = await tokens.findOne({ phone });
+    const user = await tokens.findOne({ whatsapp: phone });
 
+    // Not logged in
     if (!user || !user.access_token) {
-      // You could send a login link if desired
-      const loginLink = `${process.env.BASE_URL}/api/login?user=${phone}`;
+      const loginLink = `${process.env.BASE_URL}/api/login?state=user${phone}`;
       await sendWhatsApp(
         `👋 To get started, connect your WHOOP account:\n👉 ${loginLink}`,
         From
@@ -51,7 +50,7 @@ async function getGPTReply(message) {
       {
         role: "system",
         content:
-          "You are a helpful health assistant. Interpret WHOOP metrics and any health data pdfs stored with this user concisely and give recommendations, in 100 words or less.",
+          "You are a helpful health assistant. Interpret WHOOP metrics concisely and give recommendations.",
       },
       { role: "user", content: message },
     ],
