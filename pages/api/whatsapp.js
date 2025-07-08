@@ -1,12 +1,30 @@
+// pages/api/whatsapp.js
+
 import Twilio from "twilio";
 import { parse } from "querystring";
 import { OpenAI } from "openai";
 import { MongoClient } from "mongodb";
 import fetch from "node-fetch";
 import pdfParse from "pdf-parse";
+import FormData from "form-data";
 
 export const config = { api: { bodyParser: false } };
 
+// ----------- CLEAN OCR TEXT FUNCTION ------------
+function cleanOcrText(text) {
+  if (!text) return "";
+  // Insert a space between a marker and a number if missing: LDL-C:4.2 → LDL-C: 4.2
+  let out = text.replace(/([A-Za-z\-\+\/]+):([0-9])/g, "$1: $2");
+  // Add space before units if missing (mmol/L, mg/dL, %)
+  out = out.replace(/([0-9])([a-zA-Z%\/]+)/g, "$1 $2");
+  // Split markers jammed together: HDL: 1.7LDL: 2.4 → HDL: 1.7\nLDL: 2.4
+  out = out.replace(/([0-9]\s*[a-zA-Z%\/]*)\s*([A-Z][A-Za-z\-]+:)/g, "$1\n$2");
+  // Remove duplicate spaces
+  out = out.replace(/\s{2,}/g, " ");
+  return out;
+}
+
+// ----------- MAIN HANDLER ------------
 export default async function handler(req, res) {
   let rawBody = "";
   await new Promise((resolve) => {
@@ -18,6 +36,7 @@ export default async function handler(req, res) {
   const { From, Body, NumMedia } = body;
   const phone = (From || "").replace("whatsapp:", "").replace("+", "");
   let extractedText = "";
+  let cleanedText = "";
   let mediaNote = "";
 
   // -- OCR Logic for files (images/PDFs) --
@@ -27,7 +46,6 @@ export default async function handler(req, res) {
       const mediaUrl = body[`MediaUrl${i}`];
       if (mediaType === "application/pdf") {
         try {
-          // Try as text PDF
           extractedText += await fetchAndParsePDF(mediaUrl);
         } catch (err) {
           // Fallback: OCR as image (scanned PDF)
@@ -43,10 +61,12 @@ export default async function handler(req, res) {
     }
   }
 
-  // --- Extract blood markers (very basic regex for demo, customize for your lab reports) ---
+  // Clean and save the OCR text
+  cleanedText = cleanOcrText(extractedText);
+
+  // --- Extract blood markers (simple regex for demo) ---
   const markers = {};
-  // Example: matches LDL-C: 3.9 or LDL: 3.9 etc
-  (extractedText || "").split(/\n/).forEach(line => {
+  (cleanedText || "").split(/\n/).forEach(line => {
     let m = line.match(/([A-Za-z\(\)\-\+0-9\/ ]{2,15})[: ]+([0-9\.]+)/);
     if (m) markers[m[1].replace(/\s+/g,'').replace(/[^A-Za-z0-9\-]/g,'')] = parseFloat(m[2]);
   });
@@ -65,9 +85,10 @@ export default async function handler(req, res) {
     if (Object.keys(markers).length > 0) {
       await bloods.insertOne({
         whatsapp: phone,
-        date: new Date(), // You could parse this from the text if needed
+        date: new Date(),
         markers,
         raw_text: extractedText,
+        cleaned_text: cleanedText,
         created_at: new Date()
       });
       mediaNote += `Blood results saved: ${Object.keys(markers).join(', ')}.\n`;
@@ -76,7 +97,6 @@ export default async function handler(req, res) {
     // --- Chart reply if asked for a marker ---
     const chartMarker = getChartRequestMarker(Body);
     if (chartMarker) {
-      // Query last 10 readings for this marker
       const lastResults = await bloods.find({ whatsapp: phone, [`markers.${chartMarker}`]: { $exists: true } })
         .sort({ date: -1 })
         .limit(10)
@@ -106,16 +126,17 @@ export default async function handler(req, res) {
     }
 
     // Compose GPT prompt
-    let systemPrompt = `You are an advanced health assistant for biohackers. Use all context from blood tests (markers, values, trends), uploaded PDF/image text, and WHOOP metrics (if present). Never dump raw data unless asked for "details".`;
+    let systemPrompt = `You are an advanced and friendly health assistant for biohackers. Use all available context from blood tests (markers, values, trends), uploaded PDF/image text (after fixing spacing), and WHOOP metrics if present. Never dump raw data unless asked for "details". If there is little context, politely ask for more info or suggest what the user might provide.`;
     let userPrompt = `User: "${Body}"\n`;
     if (Object.keys(markers).length) userPrompt += `\nRecent bloods: ${JSON.stringify(markers)}`;
     if (mediaNote) userPrompt += `\nNote: ${mediaNote}`;
+    if (cleanedText && !Object.keys(markers).length) userPrompt += `\nExtracted: ${cleanedText}`;
     if (whoop && whoop.user_id) userPrompt += `\nWHOOP profile: ${whoop.first_name} ${whoop.last_name}`;
 
     let gptResponse = "";
     try {
       gptResponse = await getGPTReply(systemPrompt, userPrompt);
-      gptResponse = gptResponse.slice(0, 1600);
+      gptResponse = gptResponse.slice(0, 1600); // Twilio limit
     } catch {
       gptResponse = "Sorry, something went wrong!";
     }
@@ -194,7 +215,6 @@ function buildQuickChartUrl(dates, values, marker) {
 }
 
 function getChartRequestMarker(text) {
-  // User message: "Show me my LDL" or "Plot HDL trend"
   const possible = ["LDL", "HDL", "ApoB", "Lp(a)", "VitaminD", "Glucose", "Triglycerides", "Ferritin"];
   for (const marker of possible) {
     if (text && text.toLowerCase().includes(marker.toLowerCase())) return marker.replace(/[^A-Za-z0-9\-]/g,'');
@@ -223,4 +243,5 @@ async function sendWhatsApp(text, to, mediaUrl) {
     ...(mediaUrl ? { mediaUrl } : {})
   });
 }
+
 
