@@ -7,25 +7,23 @@ export default async function handler(req, res) {
   const code = req.query.code;
   const state = req.query.state;
 
-  // Debug state
-  console.log("[DEBUG] code:", code);
-  console.log("[DEBUG] state (raw):", state);
+  console.log('[CALLBACK] code:', code);
+  console.log('[CALLBACK] raw state:', state);
 
-  // Decode whatsapp number from state
-  let whatsapp = null;
-  if (state && state.includes('=')) {
-    // Accept "whatsapp=..." or "phone=..."
-    const pairs = state.split("&");
-    for (const pair of pairs) {
-      const [k, v] = pair.split("=");
-      if (k === "whatsapp" || k === "phone") whatsapp = v;
+  // Parse user from state
+  let user = null;
+  if (state) {
+    try {
+      user = new URLSearchParams(state).get('user');
+    } catch (err) {
+      console.error('[CALLBACK] URLSearchParams error:', err);
     }
   }
 
-  console.log("[DEBUG] whatsapp (parsed):", whatsapp);
+  console.log('[CALLBACK] parsed user:', user);
 
-  if (!code || !whatsapp) {
-    return res.status(400).json({ error: "Missing WhatsApp number", debug: { code, state, whatsapp } });
+  if (!code || !user) {
+    return res.status(400).json({ error: "Missing code or user/phone number", debug: { code, state, user } });
   }
 
   const client_id = process.env.WHOOP_CLIENT_ID;
@@ -47,7 +45,7 @@ export default async function handler(req, res) {
     });
 
     const tokenData = await tokenRes.json();
-    console.log("[DEBUG] tokenData:", tokenData);
+    console.log('[CALLBACK] tokenData:', tokenData);
 
     if (!tokenData.access_token) {
       return res.status(500).json({ error: "Token exchange failed", debug: tokenData });
@@ -60,13 +58,13 @@ export default async function handler(req, res) {
     const collection = db.collection("whoop_tokens");
 
     await collection.updateOne(
-      { whatsapp },
+      { user },
       {
         $set: {
-          whatsapp,
+          user,
           ...tokenData,
           created_at: new Date(),
-          expires_at: new Date(Date.now() + (tokenData.expires_in || 3600) * 1000)
+          expires_at: new Date(Date.now() + tokenData.expires_in * 1000)
         }
       },
       { upsert: true }
@@ -74,8 +72,8 @@ export default async function handler(req, res) {
 
     await mongoClient.close();
 
-    // Redirect back to WhatsApp chat (can be wa.me or just a thank you page)
-    res.redirect("https://wa.me/" + encodeURIComponent(whatsapp));
+    // Redirect back to WhatsApp chat or success page
+    res.redirect("https://wa.me/" + encodeURIComponent(user));
   } catch (err) {
     console.error("OAuth callback failed:", err);
     res.status(500).json({ error: "OAuth callback failed", debug: err.message });
