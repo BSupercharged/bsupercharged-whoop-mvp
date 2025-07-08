@@ -45,7 +45,7 @@ export default async function handler(req, res) {
 
     // Use OpenAI for analysis (limit to 1500 chars)
     const message = await getGPTReply(
-      `Act as an advanced health coach and biohacker. Here are my latest WHOOP data: Recovery score ${recovery.recovery_score}, HRV ${recovery.hrv}, RHR ${recovery.rhr}, SpO2 ${recovery.spo2}. Summarise yesterday in 3 lines. Limit your reply to 1500 characters.`
+      `Act as an advanced health coach and biohacker. Here is my latest WHOOP data: Recovery score ${recovery.recovery_score}, HRV ${recovery.hrv}, RHR ${recovery.rhr}, SpO2 ${recovery.spo2}. Summarise yesterday in 3 lines. Limit your reply to 1500 characters. Analyze any of the PDFs and files provided and be the expert biohacker to look at wearable data and test data at teh same time to advise the user.`
     );
 
     await sendWhatsApp(message, From);
