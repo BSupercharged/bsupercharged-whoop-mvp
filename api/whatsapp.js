@@ -1,23 +1,28 @@
-import { MongoClient } from 'mongodb';
-import { OpenAI } from 'openai';
-import Twilio from 'twilio';
-import fetch from 'node-fetch';
+import { MongoClient } from "mongodb";
+import { OpenAI } from "openai";
+import Twilio from "twilio";
+import fetch from "node-fetch";
 
 export default async function handler(req, res) {
   try {
     const { Body, From } = req.body;
-    const phone = From.replace("whatsapp:", "");
+    // Extract digits only (matching your saved key)
+    const phone = From.replace(/\D/g, '');
+
+    console.log("[WhatsApp] Incoming from:", From, "Digits:", phone);
+    console.log("[WhatsApp] Body:", Body);
 
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const tokens = db.collection("whoop_tokens");
 
+    // Find user by digits-only phone
     const user = await tokens.findOne({ whatsapp: phone });
+    console.log("[MongoDB] User found?", !!user);
 
-    // Not logged in
     if (!user || !user.access_token) {
-      const loginLink = `${process.env.BASE_URL}/api/login?state=user${phone}`;
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
         `👋 To get started, connect your WHOOP account:\n👉 ${loginLink}`,
         From
@@ -26,9 +31,10 @@ export default async function handler(req, res) {
       return res.status(200).send("Login link sent");
     }
 
-    // Logged in, fetch recovery data
+    // Fetch recovery from WHOOP
     const recovery = await getLatestWhoopRecovery(user.access_token);
 
+    // Ask OpenAI for advice based on the metrics
     const message = await getGPTReply(
       `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`
     );
@@ -55,11 +61,15 @@ async function getGPTReply(message) {
       { role: "user", content: message },
     ],
   });
-  return chat.choices[0].message.content.trim();
+  // Truncate if message is too long for WhatsApp/Twilio (max 1600 chars)
+  return chat.choices[0].message.content.trim().slice(0, 1500);
 }
 
 async function sendWhatsApp(text, to) {
-  const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  const client = Twilio(
+    process.env.TWILIO_ACCOUNT_SID,
+    process.env.TWILIO_AUTH_TOKEN
+  );
   await client.messages.create({
     from: process.env.TWILIO_WHATSAPP_NUMBER,
     to,
