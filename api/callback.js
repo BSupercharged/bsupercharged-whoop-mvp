@@ -1,5 +1,3 @@
-// /api/callback.js
-
 import { MongoClient } from 'mongodb';
 import fetch from 'node-fetch';
 
@@ -7,9 +5,14 @@ export default async function handler(req, res) {
   const code = req.query.code;
   const state = req.query.state;
 
-  const whatsapp = new URLSearchParams(state).get("whatsapp");
-  if (!code || !whatsapp) {
-    return res.status(400).json({ error: "Missing code or invalid WhatsApp number" });
+  // Parse last 9 digits from state
+  let phone = "";
+  if (typeof state === "string" && state.startsWith("phone=")) {
+    phone = state.split("=")[1];
+  }
+
+  if (!code || !phone) {
+    return res.status(400).json({ error: "Missing code or phone", debug: { code, state, phone } });
   }
 
   const client_id = process.env.WHOOP_CLIENT_ID;
@@ -17,7 +20,7 @@ export default async function handler(req, res) {
   const redirect_uri = process.env.WHOOP_REDIRECT_URI;
 
   try {
-    // Exchange code for access token
+    // Exchange code for token
     const tokenRes = await fetch("https://api.prod.whoop.com/oauth/oauth2/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -42,13 +45,13 @@ export default async function handler(req, res) {
     const collection = db.collection("whoop_tokens");
 
     await collection.updateOne(
-      { whatsapp },
+      { phone },
       {
         $set: {
-          whatsapp,
+          phone,
           ...tokenData,
           created_at: new Date(),
-          expires_at: new Date(Date.now() + tokenData.expires_in * 1000)
+          expires_at: new Date(Date.now() + (tokenData.expires_in || 3600) * 1000)
         }
       },
       { upsert: true }
@@ -56,12 +59,10 @@ export default async function handler(req, res) {
 
     await mongoClient.close();
 
-    // Redirect back to WhatsApp chat
-    res.redirect("https://wa.me/" + encodeURIComponent(whatsapp));
+    // Redirect to custom success page (optional)
+    res.redirect(`/login-redirect-success?phone=${phone}`);
   } catch (err) {
     console.error("OAuth callback failed:", err);
-    res.status(500).json({ error: "OAuth callback failed", debug: err.message });
+    return res.status(500).json({ error: "OAuth callback failed", debug: err.message });
   }
 }
-
-
