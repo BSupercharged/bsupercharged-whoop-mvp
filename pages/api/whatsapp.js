@@ -27,9 +27,8 @@ export default async function handler(req, res) {
 
   const { From, Body, NumMedia } = body;
   const phone = (From || "").replace("whatsapp:", "").replace("+", "");
-  let extractedText = "";
-  let cleanedText = "";
-  let mediaNote = "";
+  let extractedText = "", cleanedText = "", mediaNote = "";
+  let mongoClient, user = null;
 
   // --- OCR for images and PDFs ---
   if (NumMedia && Number(NumMedia) > 0) {
@@ -51,8 +50,6 @@ export default async function handler(req, res) {
       }
     }
   }
-
-  // Clean and parse markers from OCR text
   cleanedText = cleanOcrText(extractedText);
   const markers = {};
   (cleanedText || "").split(/\n/).forEach(line => {
@@ -60,7 +57,6 @@ export default async function handler(req, res) {
     if (m) markers[m[1].replace(/\s+/g,'').replace(/[^A-Za-z0-9\-]/g,'')] = parseFloat(m[2]);
   });
 
-  let mongoClient, user = null;
   let pastMarkersSummary = "";
   try {
     mongoClient = new MongoClient(process.env.MONGODB_URI);
@@ -70,7 +66,7 @@ export default async function handler(req, res) {
     const bloods = db.collection("blood_results");
     user = await tokens.findOne({ whatsapp: phone });
 
-    // Save bloods if found
+    // Save new bloods if found
     if (Object.keys(markers).length > 0) {
       await bloods.insertOne({
         whatsapp: phone,
@@ -104,59 +100,52 @@ export default async function handler(req, res) {
     const wantsWhoop = whoopKeywords.some(k =>
       (Body || "").toLowerCase().includes(k)
     );
-    if (wantsWhoop && (!user || !user.access_token)) {
-      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
-      await sendWhatsApp(
-        `🔐 To access your WHOOP data, please log in here:\n${loginLink}`,
-        From
-      );
-      await mongoClient.close();
-      return res.status(200).setHeader("Content-Type", "text/plain").end();
-    }
+    let sendLogin = false;
 
-    // --- WHOOP Data Fetch (full context!) ---
-    let whoopProfile = null, whoopProfileErr = false;
-    let whoopRecovery = null, whoopRecoveryErr = false;
-    let whoopSleep = null, whoopSleepErr = false;
-    let whoopStrain = null, whoopStrainErr = false;
-
+    // --- WHOOP Data Fetch (with fallback on 401) ---
+    let whoopProfile = null, whoopRecovery = null, whoopSleep = null, whoopStrain = null;
     if (user && user.access_token) {
-      try {
-        whoopProfile = await fetchWhoop("user/profile/basic", user.access_token);
-        if (!whoopProfile.user_id) whoopProfileErr = true;
-      } catch { whoopProfileErr = true; }
-
+      // try/catch for each; if 401 or missing, reauth and early exit
       const today = new Date();
       const lastYear = new Date(today); lastYear.setFullYear(today.getFullYear() - 1);
       const start = lastYear.toISOString().split("T")[0];
       const end = today.toISOString().split("T")[0];
 
       try {
+        whoopProfile = await fetchWhoop("user/profile/basic", user.access_token);
+        if (!whoopProfile.user_id) throw new Error("401");
+      } catch {
+        await tokens.updateOne({ whatsapp: phone }, { $unset: { access_token: "" } });
+        sendLogin = true;
+      }
+
+      try {
         whoopRecovery = await fetchWhoop(`recovery?start=${start}&end=${end}`, user.access_token);
-        if (!Array.isArray(whoopRecovery.records)) whoopRecoveryErr = true;
-      } catch { whoopRecoveryErr = true; }
+        if (!Array.isArray(whoopRecovery.records)) throw new Error("401");
+      } catch {
+        await tokens.updateOne({ whatsapp: phone }, { $unset: { access_token: "" } });
+        sendLogin = true;
+      }
 
       try {
         whoopSleep = await fetchWhoop(`sleep?start=${start}&end=${end}`, user.access_token);
-        if (!Array.isArray(whoopSleep.records)) whoopSleepErr = true;
-      } catch { whoopSleepErr = true; }
+        if (!Array.isArray(whoopSleep.records)) whoopSleep = null;
+      } catch { whoopSleep = null; }
 
       try {
         whoopStrain = await fetchWhoop(`workout?start=${start}&end=${end}`, user.access_token);
-        if (!Array.isArray(whoopStrain.records)) whoopStrainErr = true;
-      } catch { whoopStrainErr = true; }
+        if (!Array.isArray(whoopStrain.records)) whoopStrain = null;
+      } catch { whoopStrain = null; }
     }
 
-    // If token is invalid/expired
+    // Always send login if necessary (NO reauth loop!)
     if (
-      user &&
-      user.access_token &&
-      (whoopProfileErr || whoopRecoveryErr)
+      sendLogin ||
+      (!user || !user.access_token) && wantsWhoop
     ) {
-      await tokens.updateOne({ whatsapp: phone }, { $unset: { access_token: "" } });
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
-        `🔄 Your WHOOP connection has expired. Please log in again:\n${loginLink}`,
+        `🔐 To access your WHOOP data, please log in here:\n${loginLink}`,
         From
       );
       await mongoClient.close();
@@ -170,7 +159,6 @@ export default async function handler(req, res) {
     if (pastMarkersSummary) userPrompt += `\nPrevious blood markers:\n${pastMarkersSummary}`;
     if (mediaNote) userPrompt += `\nNote: ${mediaNote}`;
     if (cleanedText && !Object.keys(markers).length) userPrompt += `\nExtracted: ${cleanedText}`;
-
     if (whoopProfile && whoopProfile.user_id) userPrompt += `\nWHOOP profile: ${JSON.stringify(whoopProfile)}`;
     if (whoopRecovery && whoopRecovery.records) userPrompt += `\nRecent WHOOP recovery (sample): ${JSON.stringify(whoopRecovery.records.slice(0, 5))}`;
     if (whoopSleep && whoopSleep.records) userPrompt += `\nRecent WHOOP sleep (sample): ${JSON.stringify(whoopSleep.records.slice(0, 3))}`;
@@ -199,6 +187,7 @@ async function fetchWhoop(path, token) {
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` }
   });
+  if (res.status === 401) throw new Error("401");
   if (!res.ok) return {};
   try { return await res.json(); } catch { return {}; }
 }
@@ -262,5 +251,6 @@ async function sendWhatsApp(text, to) {
     body: text,
   });
 }
+
 
 
