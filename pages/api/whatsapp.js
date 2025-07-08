@@ -28,31 +28,21 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Try fetching recovery. If token fails, prompt login again
+    // *** THE KEY: inline try/catch ONLY around this block ***
     let recovery;
-    let loginLink;
     try {
       recovery = await getLatestWhoopRecovery(user.access_token);
     } catch (err) {
-      console.log("[WHOOP] Error:", err.message);
-      if (err.message && err.message.includes("401")) {
-        loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
-        await safeSendWhatsApp(
-          `🔑 Your WHOOP session expired. Please log in again:\n${loginLink}`,
-          From
-        );
-        await mongoClient.close();
-        res.status(200).send("Login link sent after 401");
-        return;
-      } else {
-        await safeSendWhatsApp(
-          "❗️Sorry, something went wrong fetching your WHOOP data. Please try again.",
-          From
-        );
-        await mongoClient.close();
-        res.status(200).send("Error message sent to user");
-        return;
-      }
+      // *** THIS IS ALWAYS EXECUTED ON 401/ANY ERROR ***
+      console.log("[WHOOP fetch error]", err.message);
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
+      await safeSendWhatsApp(
+        `🔑 Your WHOOP session expired or there was a problem. Please log in again:\n${loginLink}`,
+        From
+      );
+      await mongoClient.close();
+      res.status(200).send("Login link sent after error");
+      return;
     }
 
     // If recovery fetched, reply using OpenAI
@@ -74,12 +64,13 @@ export default async function handler(req, res) {
       } catch (err2) {}
     }
     if (mongoClient) await mongoClient.close();
-    res.status(200).send("Internal error"); // Always return 200!
+    res.status(200).send("Internal error");
     return;
   }
 }
 
-// Enhanced Twilio sender with debug output!
+// --- Rest of code unchanged below ---
+
 async function safeSendWhatsApp(text, to) {
   try {
     if (!to) {
@@ -134,3 +125,4 @@ async function getLatestWhoopRecovery(token) {
     spo2: latest.spo2_percentage || 0,
   };
 }
+
