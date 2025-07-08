@@ -1,10 +1,26 @@
+// /pages/api/whatsapp.js
+
 import { MongoClient } from "mongodb";
 import Twilio from "twilio";
+import { parse } from "querystring"; // Node.js native
+
+// Disable Next.js built-in bodyParser, so we can parse Twilio's webhooks
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
 
 export default async function handler(req, res) {
-  const { Body, From } = req.body;
-  let debugLog = [];
+  let rawBody = "";
+  await new Promise((resolve) => {
+    req.on("data", (chunk) => { rawBody += chunk; });
+    req.on("end", resolve);
+  });
+  const body = parse(rawBody);
 
+  const { Body, From } = body;
+  let debugLog = [];
   debugLog.push(`[WhatsApp] Incoming from: ${From}`);
   debugLog.push(`[WhatsApp] Body: ${Body}`);
 
@@ -40,7 +56,9 @@ export default async function handler(req, res) {
     debugLog.push(`[ERROR]: ${err?.message}`);
     try {
       await sendWhatsApp(`DEBUG (error):\n${debugLog.join("\n")}`, From);
-    } catch { /* ignore Twilio fail */ }
+    } catch {
+      // ignore Twilio fail
+    }
     res.status(500).send("Error handled, debug sent");
   }
 }
@@ -52,37 +70,4 @@ async function sendWhatsApp(text, to) {
     to,
     body: text.length > 1500 ? text.slice(0, 1500) : text,
   });
-}
-
-
-export default async function handler(req, res) {
-  let Body, From;
-  try {
-    if (req.method === "POST") {
-      const form = await parseFormBody(req);
-      Body = form.Body;
-      From = form.From;
-    } else {
-      Body = req.body?.Body;
-      From = req.body?.From;
-    }
-
-    console.log("[DEBUG] Method:", req.method);
-    console.log("[DEBUG] Body:", Body);
-    console.log("[DEBUG] From:", From);
-
-    if (!Body || !From) {
-      // Respond 200 so Twilio doesn't error, but log problem
-      console.error("[ERROR] Missing Body or From in request");
-      return res.status(200).send("Missing data");
-    }
-
-    // ... (rest of your existing logic)
-
-    // For now, just echo back for debugging
-    res.status(200).send("Received: " + Body);
-  } catch (err) {
-    console.error("[ERROR] WhatsApp handler crashed:", err);
-    res.status(200).send("Error");
-  }
 }
