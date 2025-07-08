@@ -1,29 +1,31 @@
+// /api/callback.js
+
 import { MongoClient } from 'mongodb';
 import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
-  const { code, state } = req.query;
+  const code = req.query.code;
+  const state = req.query.state;
 
-  // Add debug info
-  console.log("[DEBUG] Query received by /api/callback:", req.query);
+  // Debug state
+  console.log("[DEBUG] code:", code);
+  console.log("[DEBUG] state (raw):", state);
 
-  // Attempt to parse whatsapp from state
+  // Decode whatsapp number from state
   let whatsapp = null;
-  try {
-    // If state is like "phone=123456789", use URLSearchParams
-    const params = new URLSearchParams(state);
-    whatsapp = params.get("phone") || params.get("whatsapp");
-  } catch (err) {
-    console.log("[DEBUG] Failed to parse state param:", err, "Raw state:", state);
+  if (state && state.includes('=')) {
+    // Accept "whatsapp=..." or "phone=..."
+    const pairs = state.split("&");
+    for (const pair of pairs) {
+      const [k, v] = pair.split("=");
+      if (k === "whatsapp" || k === "phone") whatsapp = v;
+    }
   }
 
-  if (!code) {
-    return res.status(400).json({ error: "Missing code in callback", debug: req.query });
-  }
+  console.log("[DEBUG] whatsapp (parsed):", whatsapp);
 
-  if (!whatsapp) {
-    // Return everything we got for debugging
-    return res.status(400).json({ error: "Missing WhatsApp number after OAuth", debug: { state, query: req.query } });
+  if (!code || !whatsapp) {
+    return res.status(400).json({ error: "Missing WhatsApp number", debug: { code, state, whatsapp } });
   }
 
   const client_id = process.env.WHOOP_CLIENT_ID;
@@ -45,6 +47,8 @@ export default async function handler(req, res) {
     });
 
     const tokenData = await tokenRes.json();
+    console.log("[DEBUG] tokenData:", tokenData);
+
     if (!tokenData.access_token) {
       return res.status(500).json({ error: "Token exchange failed", debug: tokenData });
     }
@@ -62,7 +66,7 @@ export default async function handler(req, res) {
           whatsapp,
           ...tokenData,
           created_at: new Date(),
-          expires_at: new Date(Date.now() + tokenData.expires_in * 1000)
+          expires_at: new Date(Date.now() + (tokenData.expires_in || 3600) * 1000)
         }
       },
       { upsert: true }
@@ -70,7 +74,7 @@ export default async function handler(req, res) {
 
     await mongoClient.close();
 
-    // Redirect back to WhatsApp chat
+    // Redirect back to WhatsApp chat (can be wa.me or just a thank you page)
     res.redirect("https://wa.me/" + encodeURIComponent(whatsapp));
   } catch (err) {
     console.error("OAuth callback failed:", err);
