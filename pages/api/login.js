@@ -1,38 +1,19 @@
-// pages/api/login.js
-
+// /pages/api/login.js
 export default async function handler(req, res) {
-  // 1. Extract the WhatsApp number from query string
   const { whatsapp } = req.query;
-
-  console.log('📥 Incoming login request with:', req.query);
-
-  // 2. Validate that we received the WhatsApp number
-  if (!whatsapp) {
-    return res.status(400).json({ error: "Missing WhatsApp number in query string" });
-  }
-
-  // 3. Construct the WHOOP OAuth2 URL
-  const clientId = process.env.WHOOP_CLIENT_ID;
+  // Extract last 9 digits for state (default to "000000000" if missing)
+  const phone = whatsapp ? whatsapp.replace(/[^\d]/g, '').slice(-9) : "000000000";
+  const state = `phone=${phone}`;
   const redirectUri = encodeURIComponent(process.env.WHOOP_REDIRECT_URI);
-
-  const scope = [
-    'read:profile',
-    'read:recovery',
-    'read:sleep',
-    'read:workout',
-    'read:body_measurement'
-  ].join(' ');
-
-  const state = `whatsapp=${encodeURIComponent(whatsapp)}`;
+  const clientId = process.env.WHOOP_CLIENT_ID;
 
   const authUrl =
     `https://api.prod.whoop.com/oauth/oauth2/auth` +
     `?response_type=code` +
     `&client_id=${clientId}` +
     `&redirect_uri=${redirectUri}` +
-    `&scope=${encodeURIComponent(scope)}` +
+    `&scope=read:profile read:recovery read:sleep read:workout read:body_measurement` +
     `&state=${state}`;
 
-  // 4. Redirect user to WHOOP OAuth login
-  return res.redirect(authUrl);
+  res.redirect(authUrl);
 }
