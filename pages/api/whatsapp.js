@@ -5,10 +5,9 @@ import { MongoClient } from "mongodb";
 import fetch from "node-fetch";
 import Tesseract from "tesseract.js";
 import pdfParse from "pdf-parse";
+import { PDFDocument } from "pdf-lib"; // Add pdf-lib for page images
 
-export const config = {
-  api: { bodyParser: false },
-};
+export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
   let rawBody = "";
@@ -20,17 +19,9 @@ export default async function handler(req, res) {
 
   const { From, Body, NumMedia } = body;
   const phone = (From || "").replace("whatsapp:", "").replace("+", "");
-
-  console.log(`[WhatsApp] Incoming from: ${From} Digits: ${phone}`);
-  console.log(`[WhatsApp] Body: ${Body}`);
-  if (NumMedia && Number(NumMedia) > 0) {
-    for (let i = 0; i < Number(NumMedia); i++) {
-      console.log(`[WhatsApp] MediaUrl${i}:`, body[`MediaUrl${i}`], `(type: ${body[`MediaContentType${i}`]})`);
-    }
-  }
-
-  // --- 1. Media: OCR image or PDF ---
   let mediaNote = "", ocrResult = "";
+
+  // --- 1. OCR for images & PDFs ---
   if (NumMedia && Number(NumMedia) > 0) {
     for (let i = 0; i < Number(NumMedia); i++) {
       const mediaType = body[`MediaContentType${i}`];
@@ -38,27 +29,23 @@ export default async function handler(req, res) {
       if (mediaType && mediaType.startsWith("image/")) {
         try {
           const ocrText = await fetchAndOcrImage(mediaUrl);
-          ocrResult += `🖼️ OCR result from your image: "${ocrText.slice(0, 300)}"${ocrText.length > 300 ? '...' : ''}\n`;
+          ocrResult += `OCR result: "${ocrText.slice(0, 350)}"${ocrText.length > 350 ? '...' : ''}\n`;
         } catch (err) {
-          ocrResult += `❗ Could not process the image for OCR.\n`;
+          ocrResult += `Could not process the image for OCR.\n`;
         }
       } else if (mediaType === "application/pdf") {
         try {
-          const pdfText = await fetchAndParsePDF(mediaUrl);
-          ocrResult += `📄 Text extracted from your PDF:\n"${pdfText.slice(0, 600)}"${pdfText.length > 600 ? '...' : ''}\n`;
+          ocrResult += await smartPDFExtract(mediaUrl);
         } catch (err) {
-          ocrResult += `❗ Could not process the PDF. (${err.message})\n`;
+          ocrResult += `Could not process the PDF. (${err.message})\n`;
         }
       } else {
         mediaNote += `Received media file ${i + 1}: ${mediaUrl} (type: ${mediaType})\n`;
       }
     }
-    if (!ocrResult && mediaNote) {
-      ocrResult = `Received your media. PDF and advanced doc analysis is supported!`;
-    }
   }
 
-  // --- 2. Load user context from MongoDB ---
+  // --- 2. Load user context ---
   let user, latestRecovery = {};
   try {
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
@@ -71,76 +58,68 @@ export default async function handler(req, res) {
     if (!user || !user.access_token) {
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
-        `👋 Hi! To get your full health insights, please link your WHOOP account here:\n${loginLink}\n(Soon: support for other wearables like Ultrahuman!)`,
+        `Hi! Please connect your WHOOP account here: ${loginLink}`,
         From
       );
       await mongoClient.close();
       return res.status(200).setHeader("Content-Type", "text/plain").end();
     }
-
-    // Try to get WHOOP Recovery (skip error if fail)
     try {
       latestRecovery = await getLatestWhoopRecovery(user.access_token);
-      console.log("[WHOOP] Latest Recovery:", latestRecovery);
-    } catch (err) {
-      console.log("[WHOOP] Could not get recovery data:", err.message);
-    }
-
+    } catch {}
     await mongoClient.close();
-  } catch (dbErr) {
-    console.log("[MongoDB] ERROR:", dbErr.message);
-    await sendWhatsApp("😬 Oops, we're having a little trouble accessing your data. Please try again in a bit!", From);
-    return res.status(500).setHeader("Content-Type", "text/plain").end();
+  } catch {}
+
+  // --- 3. Craft prompt ---
+  // Only include the metrics if the user asks for "details", "show", or similar
+  let bodyLC = (Body || "").toLowerCase();
+  let addWhoopDetails = ["detail", "raw", "show", "data", "numbers", "json"].some(w => bodyLC.includes(w));
+  let whoopSummary = "";
+  if (latestRecovery && Object.keys(latestRecovery).length) {
+    if (addWhoopDetails) {
+      whoopSummary = `WHOOP raw recovery data: ${JSON.stringify(latestRecovery)}\n`;
+    } else {
+      whoopSummary = `Your current metrics: recovery score ${latestRecovery.recovery_score}, HRV ${latestRecovery.hrv}, RHR ${latestRecovery.rhr}, SpO2 ${latestRecovery.spo2}.\n`;
+    }
   }
 
-  // --- 3. Build advanced GPT prompt ---
-  let prompt = `You are a friendly but highly advanced health and longevity coach for expert biohackers.
-Context:
-- WHOOP recovery: ${Object.keys(latestRecovery).length ? JSON.stringify(latestRecovery) : "Not available"}
-- OCR from images or PDFs: ${ocrResult.trim() || "None"}
-- Other media: ${mediaNote ? mediaNote.trim() : "None"}
-- User said: "${Body}"
+  // Only mention metrics if relevant or requested
+  let systemPrompt = `You are a friendly but advanced health and biohacking assistant for expert users. Only show metrics if the user asks for details or numbers. Use all available context (OCR, PDF, WHOOP) but keep replies concise and actionable.`;
+  let context = [
+    whoopSummary && addWhoopDetails ? whoopSummary : "", // Only add raw data if requested
+    ocrResult ? `Extracted info: ${ocrResult}` : "",
+    mediaNote ? `Other media: ${mediaNote}` : "",
+    `User: "${Body}"`
+  ].filter(Boolean).join("\n");
 
-Instructions:
-- Be concise, insightful, and friendly. Avoid generic tips.
-- If there is little context, or something seems unclear or unusual, ask the user to share more info or upload a PDF, bloodwork, or say what wearable they're using.
-- If an OCR or PDF result is present, try to interpret it (e.g., lab results, supplements).
-- Mention that support for other wearables like Ultrahuman is coming soon.
-- Always reply conversationally, and invite the user to clarify or send more details if needed.
-`;
-
-  // --- 4. If basically nothing to work with, prompt user ---
   if (!Body || Body.trim().length < 3) {
     await sendWhatsApp(
-      `Hi there! 😊 Could you tell me a bit more about what you'd like to know, or upload a lab report, supplement list, or ask about your recovery?`,
+      `Hi! 😊 Can you tell me a bit more, or upload a lab report, supplement list, or ask about your recovery?`,
       From
     );
     return res.status(200).setHeader("Content-Type", "text/plain").end();
   }
 
-  // --- 5. GPT reply (friendly, advanced, context-aware) ---
+  let prompt = `Context:\n${context}\n\nInstructions:\n- Reply concisely and conversationally.\n- If you can't find useful data or user question is unclear, ask them for more detail or to resend info.\n- Do not repeat all WHOOP metrics unless specifically asked.\n- Use advanced reasoning (e.g. interpret OCR/bloodwork if possible, or ask for a clearer PDF).\n`;
+
+  // --- 4. GPT reply ---
   let gptResponse;
   try {
-    gptResponse = await getGPTReply(prompt);
-    console.log("[GPT] Reply:", gptResponse.slice(0, 80) + "...");
-  } catch (err) {
-    console.log("[GPT] Error:", err.message);
-    gptResponse = "Sorry, I'm having trouble connecting to my brain (OpenAI)! Please try again soon. 😊";
+    gptResponse = await getGPTReply(systemPrompt, prompt);
+    // If GPT tries to paste raw data, trim it out unless user asked for it
+    if (!addWhoopDetails) {
+      gptResponse = gptResponse.replace(/(WHOOP raw recovery data:|{"recovery_score":[^}]+})/gi, "");
+    }
+    gptResponse = gptResponse.slice(0, 1600);
+  } catch {
+    gptResponse = "Sorry, something went wrong—please try again in a moment!";
   }
-
-  // --- 6. WhatsApp reply (<=1600 chars) ---
-  try {
-    await sendWhatsApp(gptResponse.length > 1600 ? gptResponse.slice(0, 1600) : gptResponse, From);
-  } catch (err) {
-    console.log("[Twilio] Error sending WhatsApp:", err.message);
-  }
-
+  try { await sendWhatsApp(gptResponse, From); } catch {}
   res.status(200).setHeader("Content-Type", "text/plain").end();
 }
 
-// --- OCR: Download and parse image ---
+// --- OCR Helpers ---
 async function fetchAndOcrImage(mediaUrl) {
-  // Twilio media URLs require basic auth: your ACCOUNT_SID as user, AUTH_TOKEN as pass
   const res = await fetch(mediaUrl, {
     headers: {
       Authorization: "Basic " + Buffer.from(
@@ -149,14 +128,12 @@ async function fetchAndOcrImage(mediaUrl) {
     },
   });
   const buffer = await res.buffer();
-
-  // OCR the image buffer (Tesseract)
   const { data: { text } } = await Tesseract.recognize(buffer, "eng");
   return text.trim();
 }
 
-// --- PDF: Download and parse PDF file ---
-async function fetchAndParsePDF(mediaUrl) {
+// --- PDF Helpers: Try text, fallback to OCR per page ---
+async function smartPDFExtract(mediaUrl) {
   const res = await fetch(mediaUrl, {
     headers: {
       Authorization: "Basic " + Buffer.from(
@@ -166,18 +143,34 @@ async function fetchAndParsePDF(mediaUrl) {
   });
   const buffer = await res.buffer();
 
-  // Parse PDF
-  const data = await pdfParse(buffer);
-  return data.text.trim();
+  // Try to extract text directly
+  let parsed = await pdfParse(buffer);
+  if (parsed.text && parsed.text.replace(/\W/g, "").length > 40) {
+    return `PDF text: "${parsed.text.slice(0, 600)}"${parsed.text.length > 600 ? '...' : ''}`;
+  }
+  // If little or no text, try to OCR each page image
+  let textResult = "";
+  try {
+    const pdfDoc = await PDFDocument.load(buffer);
+    for (let i = 0; i < pdfDoc.getPageCount(); i++) {
+      const page = pdfDoc.getPage(i);
+      const png = await page.render({ format: "png" });
+      const ocrText = await Tesseract.recognize(png, "eng");
+      textResult += ocrText.data.text + "\n";
+    }
+    return `OCR from scanned PDF: "${textResult.slice(0, 800)}"${textResult.length > 800 ? '...' : ''}`;
+  } catch (err) {
+    return "Tried to scan PDF pages, but couldn't extract any useful text.";
+  }
 }
 
-async function getGPTReply(message) {
+async function getGPTReply(system, userPrompt) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const chat = await openai.chat.completions.create({
     model: "gpt-4o",
     messages: [
-      { role: "system", content: "You are a friendly but advanced health, longevity and biohacking coach who gets a lot of knowledge from Dan Garner and Andy Galpin. Always use all context (WHOOP, user info, OCR, PDFs, media), reply conversationally, never generic, and ask for more context if things are unclear or minimal." },
-      { role: "user", content: message }
+      { role: "system", content: system },
+      { role: "user", content: userPrompt }
     ],
   });
   return chat.choices[0].message.content.trim();
