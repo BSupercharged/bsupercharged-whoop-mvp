@@ -1,113 +1,126 @@
+// /pages/api/whatsapp.js
+
 import { MongoClient } from 'mongodb';
 import { OpenAI } from 'openai';
 import Twilio from 'twilio';
 import fetch from 'node-fetch';
+import Tesseract from 'tesseract.js';
 
-// In-memory conversation history for demo purposes (for production, use persistent store)
-const userMemory = {};
+// Helper: Clean phone number (no +, no whatsapp:)
+function cleanPhone(str) {
+  if (!str) return "";
+  return str.replace("whatsapp:", "").replace(/^\+/, "").trim();
+}
+
+// Helper: Truncate to 1500 chars for Twilio
+function truncate(str) {
+  return (str || "").slice(0, 1500);
+}
 
 export default async function handler(req, res) {
   try {
-    const { Body, From } = req.body;
-    const phone = (From.replace('whatsapp:', '') || '').replace(/^\+/, '').trim();
+    const { Body, From, NumMedia } = req.body;
+    const phone = cleanPhone(From);
 
-    // Set up MongoDB connection
+    // --- DB connect
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const tokens = db.collection("whoop_tokens");
-    const files = db.collection("user_files"); // assuming files are stored here
+    const files = db.collection("user_files");
 
-    // Check for user and their WHOOP token
+    // --- MEDIA/IMAGE: OCR upload support ---
+    if (parseInt(NumMedia, 10) > 0) {
+      const mediaUrl = req.body['MediaUrl0'];
+      const mediaType = req.body['MediaContentType0'];
+
+      if (mediaType && mediaType.startsWith('image/')) {
+        const imageBuffer = await fetch(mediaUrl).then(r => r.arrayBuffer());
+        const { data: { text } } = await Tesseract.recognize(Buffer.from(imageBuffer), "eng");
+        // Store OCR for this user
+        await files.insertOne({ whatsapp: phone, type: 'ocr', text, created_at: new Date() });
+        await sendWhatsApp("📝 Your health/lab report image was processed and saved! I’ll use this for future health advice.", From);
+        await mongoClient.close();
+        return res.status(200).send("OCR done");
+      }
+      // PDF support can be added here
+    }
+
+    // --- FIND USER/TOKEN ---
     const user = await tokens.findOne({ whatsapp: phone });
     if (!user || !user.access_token) {
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
-        `👋 Hi! To give you the best insights from your data, please connect your WHOOP account here:\n👉 ${loginLink}\n\nIf you've already connected but see this message, tap the link again to refresh your connection.`, From
-      );
-      await mongoClient.close();
-      return res.status(200).send("Login link sent");
-    }
-
-    // Retrieve latest WHOOP data
-    let recovery;
-    try {
-      recovery = await getLatestWhoopRecovery(user.access_token);
-      if (!recovery || !recovery.recovery_score) throw new Error("No data");
-    } catch (err) {
-      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
-      await sendWhatsApp(
-        `🔒 Your WHOOP login has expired or no data is available. Please reconnect here:\n👉 ${loginLink}\n\nThis keeps your health assistant up-to-date!`,
+        `👋 Hi! To connect your WHOOP account, tap to login here:\n${loginLink}\n\nIf you don't use WHOOP, reply with your wearable or upload a lab PDF/photo!`,
         From
       );
       await mongoClient.close();
-      return res.status(200).send("Login required");
+      return res.status(200).send("Login sent");
     }
 
-    // Check if we have health files/bloodwork stored for this user
-    const fileDoc = await files.findOne({ whatsapp: phone });
-    const bloodworkSummary = fileDoc?.summary || null; // or store actual values in your pipeline
-
-    // Use a memory so we don't repeat the same stats in every reply
-    const lastSummary = userMemory[phone]?.lastSummary || "";
-    let firstMsg = false;
-    let intro = "";
-
-    if (!userMemory[phone]) {
-      firstMsg = true;
-      userMemory[phone] = {};
-      intro = "Analysing your data from yesterday:\n";
+    // --- FETCH latest WHOOP RECOVERY (yesterday) ---
+    let latestData = null;
+    try {
+      latestData = await getLatestWhoopRecovery(user.access_token);
+    } catch (err) {
+      // Token expired or revoked
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
+      await sendWhatsApp(
+        `🔑 Please reconnect WHOOP here: ${loginLink}\n\nThis keeps your data fresh and advice accurate!`,
+        From
+      );
+      await mongoClient.close();
+      return res.status(200).send("Need re-login");
     }
 
-    // Compose the context for OpenAI
-    let context = "";
-    if (firstMsg) {
-      context += `Wearable: WHOOP recovery score ${recovery.recovery_score}, HRV ${recovery.hrv}, RHR ${recovery.rhr}, SpO2 ${recovery.spo2}.`;
-      if (bloodworkSummary) {
-        context += ` Bloodwork: ${bloodworkSummary}`;
-      }
+    // --- LOAD user's files/OCR context ---
+    const latestOCR = await files.find({ whatsapp: phone }).sort({ created_at: -1 }).limit(2).toArray();
+    const ocrSummary = latestOCR.map(f => f.text).join("\n\n").slice(0, 1500);
+
+    // --- CRAFT PROMPT (for first message, "Hi"/start, show summary, else converse) ---
+    let prompt = "";
+    if (/^(hi|start|hello|hey)$/i.test(Body.trim()) || Body.trim().length < 4) {
+      prompt = `You are an advanced health AI for a biohacker with wearable (WHOOP) and blood test data. Give a *summary analysis* of the latest recovery, HRV, RHR, and SpO2 from yesterday. If there are any lab/blood markers or OCR'd documents, include them in your summary. Keep it concise and do NOT repeat numbers in every reply.`
     } else {
-      // Summarise context but don't repeat metrics
-      context += "Refer to the user's wearable and blood test data already on file. Don't repeat metrics unless relevant.";
+      prompt = `
+You are an advanced biohacker assistant with access to WHOOP wearable metrics and uploaded lab/blood test data. 
+Respond to the user's query *using the latest health context*, including previous lab results or OCR text if relevant.
+If there are no files, remind the user to upload PDFs or lab images via WhatsApp for richer analysis. Keep it conversational, under 1500 characters, and do NOT repeat wearable metrics unless directly relevant to the user's question.
+User message: ${Body}
+WHOOP summary: Recovery score: ${latestData.recovery_score}, HRV: ${latestData.hrv}, RHR: ${latestData.rhr}, SpO2: ${latestData.spo2}
+Lab/ocr context: ${ocrSummary || '[No files uploaded yet]'}
+      `.replace(/\n+/g, " ").trim();
     }
-    // If no files, prompt politely
-    if (firstMsg && !bloodworkSummary) {
-      intro += "No bloodwork files found. You can upload PDF or photo files of your lab results to get deeper insights.";
-    }
 
-    // Construct the GPT prompt
-    const gptPrompt = [
-      { role: "system", content: 
-        "You are a highly advanced health assistant for a biohacker who values actionable, science-backed insights. You have access to their wearable (WHOOP) and blood test data and can reference them, but avoid repeating the same values unless specifically relevant. Always be conversational and helpful, and reference uploaded files if available. If asked about data you don't have, remind the user they can upload lab PDFs or photos at any time. Keep replies concise, high-value, and under 1500 characters."
-      },
-      { role: "user", content: `${context}\n\n${Body}` }
-    ];
+    // --- GPT REPLY ---
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const chat = await openai.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 700, // About 1500 characters
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an expert AI health coach for an advanced biohacker. Use all context (wearables, lab, OCR) to provide insightful, actionable advice. NEVER repeat basic wearable stats unless directly asked. Always keep replies under 1500 characters and reference uploaded labs or files when possible.",
+        },
+        { role: "user", content: prompt }
+      ],
+    });
 
-    // Save latest context to user memory for future use
-    userMemory[phone].lastSummary = context;
-
-    // Get reply from OpenAI
-    const reply = await getGPTReply(gptPrompt);
-
-    await sendWhatsApp(`${intro}${reply}`, From);
+    // --- Send truncated response ---
+    const reply = truncate(chat.choices[0].message.content);
+    await sendWhatsApp(reply, From);
     await mongoClient.close();
-    res.status(200).send("Response sent");
+    return res.status(200).send("Response sent");
   } catch (err) {
     console.error("Error in WhatsApp handler:", err);
-    res.status(500).send("Internal error");
+    // Fallback user-friendly message
+    try { await sendWhatsApp("⚠️ Sorry, something went wrong processing your request. Please try again or reconnect your account.", req.body.From); } catch {}
+    return res.status(500).send("Internal error");
   }
 }
 
-async function getGPTReply(messages) {
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const chat = await openai.chat.completions.create({
-    model: "gpt-4o",
-    messages,
-    max_tokens: 800 // ~1500 chars
-  });
-  return chat.choices[0].message.content.trim().slice(0, 1500);
-}
-
+// ----- HELPERS -----
 async function sendWhatsApp(text, to) {
   const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
   await client.messages.create({
