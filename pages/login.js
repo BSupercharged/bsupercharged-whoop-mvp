@@ -1,31 +1,21 @@
-/**
- * File: /pages/login.js
- * Purpose: User-facing page that redirects to WHOOP OAuth (with embedded WhatsApp number)
- */
+// /pages/api/login.js
 
-import { useRouter } from 'next/router';
-import { useEffect } from 'react';
+export default async function handler(req, res) {
+  const { whatsapp } = req.query;
+  // Extract last 9 digits for state (default to "000000000" if missing)
+  const phone = whatsapp ? whatsapp.replace(/[^\d]/g, '').slice(-9) : "000000000";
 
-export default function Login() {
-  const router = useRouter();
-  const { whatsapp } = router.query;
+  const state = `phone=${phone}`;
+  const redirectUri = encodeURIComponent(process.env.WHOOP_REDIRECT_URI);
+  const clientId = process.env.WHOOP_CLIENT_ID;
 
-  useEffect(() => {
-    if (whatsapp) {
-      fetch(`/api/login?whatsapp=${encodeURIComponent(whatsapp)}`)
-        .then(res => res.json())
-        .then(data => {
-          if (data.url) {
-            window.location.href = data.url;
-          }
-        });
-      // The /api/login endpoint responds with an HTTP redirect. The previous
-      // implementation attempted to `fetch` the endpoint and parse JSON, which
-      // fails because the response body is empty. Instead, directly navigate the
-      // browser to the API route so the redirect is handled natively.
-      window.location.href = `/api/login?whatsapp=${encodeURIComponent(whatsapp)}`;
-    }
-  }, [whatsapp]);
+  const authUrl =
+    `https://api.prod.whoop.com/oauth/oauth2/auth` +
+    `?response_type=code` +
+    `&client_id=${clientId}` +
+    `&redirect_uri=${redirectUri}` +
+    `&scope=read:profile read:recovery read:sleep read:workout read:body_measurement` +
+    `&state=${state}`;
 
-  return <p>Redirecting to WHOOP login...</p>;
+  res.redirect(authUrl);
 }
