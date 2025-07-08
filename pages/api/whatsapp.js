@@ -4,86 +4,60 @@ import Twilio from 'twilio';
 import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
-  const { Body, From, NumMedia } = req.body;
-  const phone = From.replace("whatsapp:", "");
+  try {
+    const { Body, From } = req.body;
+    const phone = (From.replace('whatsapp:', '') || '').replace(/^\+/, '').trim();
 
-  // MongoDB
-  const mongoClient = new MongoClient(process.env.MONGODB_URI);
-  await mongoClient.connect();
-  const db = mongoClient.db("whoop_mvp");
-  const tokens = db.collection("whoop_tokens");
-  const user = await tokens.findOne({ whatsapp: phone });
-  const isNewUser = !user || !user.last_seen;
+    console.log(`[WhatsApp] Incoming from: ${From} Digits: ${phone}`);
+    console.log(`[WhatsApp] Body: ${Body}`);
 
-  // Relogin or login help
-  if (
-    /relogin|login|connect|auth|authori/i.test(Body || "") ||
-    !user || !user.access_token
-  ) {
-    const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
-    await sendWhatsApp(
-      `👋 To connect your WHOOP, tap this link: ${loginLink}\nFollow the instructions and return to WhatsApp when done.`,
-      From
-    );
-    await mongoClient.close();
-    return res.status(200).end();
-  }
+    const mongoClient = new MongoClient(process.env.MONGODB_URI);
+    await mongoClient.connect();
+    const db = mongoClient.db("whoop_mvp");
+    const tokens = db.collection("whoop_tokens");
+    const user = await tokens.findOne({ whatsapp: phone });
+    console.log("[MongoDB] User found?", !!user);
 
-  // OCR placeholder for PDF/Media
-  if (NumMedia && parseInt(NumMedia) > 0) {
-    // TODO: OCR logic for PDF/images here
-    await sendWhatsApp(
-      "PDF and image analysis will be available soon. Please send a message if you need something specific analyzed.",
-      From
-    );
-    await mongoClient.close();
-    return res.status(200).end();
-  }
-
-  // On first message (or first of the day), always analyze yesterday's WHOOP recovery
-  if (isNewUser || /^(hi|hello|hey|\s*)$/i.test(Body || "")) {
-    let replyMsg = "";
-    try {
-      const recovery = await getWhoopRecovery(user.access_token, 1); // 1 = yesterday
-      if (
-        recovery &&
-        (recovery.recovery_score > 0 ||
-          recovery.hrv > 0 ||
-          recovery.rhr > 0 ||
-          recovery.spo2 > 0)
-      ) {
-        replyMsg =
-          `Analysing your WHOOP recovery for yesterday:\n` +
-          `Recovery Score: ${recovery.recovery_score}\n` +
-          `HRV: ${recovery.hrv}\n` +
-          `RHR: ${recovery.rhr}\n` +
-          `SpO2: ${recovery.spo2}\n\n` +
-          `Reply with a question to get advanced analysis or discuss trends!`;
-      } else {
-        replyMsg =
-          "No new WHOOP recovery data found for yesterday. Make sure your device is synced in the WHOOP app.";
-      }
-    } catch (e) {
-      replyMsg =
-        "Could not retrieve recovery data for yesterday. Please ensure your WHOOP is synced.";
+    if (!user || !user.access_token) {
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
+      await sendWhatsApp(
+        `👋 To get started or re-authorise, connect your WHOOP account:\n👉 ${loginLink}`,
+        From
+      );
+      await mongoClient.close();
+      return res.status(200).send("Login link sent");
     }
-    // Update user last_seen timestamp
-    await tokens.updateOne(
-      { whatsapp: phone },
-      { $set: { last_seen: new Date() } }
+
+    // Try to get WHOOP recovery data
+    let recovery;
+    try {
+      recovery = await getLatestWhoopRecovery(user.access_token);
+      if (!recovery || !recovery.recovery_score) throw new Error("No data");
+    } catch (err) {
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
+      await sendWhatsApp(
+        `⚠️ Your WHOOP login may have expired or no data found. Please log in again:\n👉 ${loginLink}`,
+        From
+      );
+      await mongoClient.close();
+      return res.status(200).send("Login required");
+    }
+
+    // Use OpenAI for analysis (limit to 1500 chars)
+    const message = await getGPTReply(
+      `Act as an advanced health coach and biohacker. Here are my latest WHOOP data: Recovery score ${recovery.recovery_score}, HRV ${recovery.hrv}, RHR ${recovery.rhr}, SpO2 ${recovery.spo2}. Summarise yesterday in 3 lines. Limit your reply to 1500 characters.`
     );
-    await sendWhatsApp(replyMsg.slice(0, 1500), From);
+
+    await sendWhatsApp(message, From);
     await mongoClient.close();
-    return res.status(200).end();
+    res.status(200).send("Response sent");
+  } catch (err) {
+    console.error("Error in WhatsApp handler:", err);
+    res.status(500).send("Internal error");
   }
+}
 
-  // For any other message, use advanced GPT health coach (with 1500 char limit)
-  let contextMsg = "";
-  if (user && user.whoop_data) {
-    contextMsg += `Latest WHOOP recovery: ${JSON.stringify(user.whoop_data)}\n`;
-  }
-  // In future, you can add: + blood marker summaries, OCR outputs, etc.
-
+async function getGPTReply(message) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const chat = await openai.chat.completions.create({
     model: "gpt-4o",
@@ -91,23 +65,13 @@ export default async function handler(req, res) {
       {
         role: "system",
         content:
-          "You are an advanced biohacker's AI assistant. Reply concisely and insightfully, using all available WHOOP or bloodwork metrics, and any OCR/PDF context if available. Skip explanations about basic health topics unless requested. All replies must be under 1500 characters.",
+          "You are an advanced health optimization coach. Reply concisely, limit to 1500 characters, and skip redundant explanations.",
       },
-      { role: "user", content: `${contextMsg}User: ${Body}` }
-    ]
+      { role: "user", content: message },
+    ],
   });
-  await sendWhatsApp(chat.choices[0].message.content.slice(0, 1500), From);
-
-  // Update last_seen
-  await tokens.updateOne(
-    { whatsapp: phone },
-    { $set: { last_seen: new Date() } }
-  );
-  await mongoClient.close();
-  res.status(200).end();
+  return chat.choices[0].message.content.trim().slice(0, 1500);
 }
-
-// ---- HELPERS ----
 
 async function sendWhatsApp(text, to) {
   const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
@@ -118,20 +82,12 @@ async function sendWhatsApp(text, to) {
   });
 }
 
-// Gets yesterday’s recovery (or latest if yesterday not found)
-async function getWhoopRecovery(token, daysAgo = 1) {
-  const end = new Date();
-  end.setUTCHours(0, 0, 0, 0);
-  end.setUTCDate(end.getUTCDate() - daysAgo + 1);
-  const start = new Date(end);
-  start.setUTCDate(end.getUTCDate() - 1);
-
-  const url = `https://api.prod.whoop.com/developer/v1/recovery?start=${start.toISOString()}&end=${end.toISOString()}&limit=1`;
-  const res = await fetch(url, {
+async function getLatestWhoopRecovery(token) {
+  const res = await fetch("https://api.prod.whoop.com/developer/v1/recovery", {
     headers: {
       Authorization: `Bearer ${token}`,
-      Accept: "application/json"
-    }
+      Accept: "application/json",
+    },
   });
   if (!res.ok) throw new Error(`WHOOP API failed: ${res.status} - ${await res.text()}`);
   const json = await res.json();
