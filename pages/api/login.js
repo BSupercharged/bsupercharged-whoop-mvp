@@ -2,12 +2,10 @@
 
 export default async function handler(req, res) {
   const { user } = req.query;
-
   if (!user) {
     return res.status(400).json({ error: "Missing user (phone) number" });
   }
-
-  // Use only last 9 digits to avoid formatting issues
+  // Use only last 9 digits
   const phone = user.replace(/[^\d]/g, '').slice(-9) || "000000000";
   const state = `user=${phone}`;
   const redirectUri = encodeURIComponent(process.env.WHOOP_REDIRECT_URI);
