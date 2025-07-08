@@ -1,17 +1,15 @@
-// /pages/api/callback.js
-
 import { MongoClient } from 'mongodb';
 import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
   const code = req.query.code;
-  const state = req.query.state;
-
-  // Parse phone number from state, e.g. state="user31610451196"
-  const whatsapp = (state && state.startsWith("user")) ? state.slice(4) : "";
+  const state = req.query.state || "";
+  // Extract whatsapp number as digits only
+  const match = state.match(/whatsapp=([^&]+)/);
+  const whatsapp = match ? match[1].replace(/^\+/, '').trim() : null;
 
   if (!code || !whatsapp) {
-    return res.status(400).json({ error: "Missing code or invalid WhatsApp number", debug: { code, state, whatsapp } });
+    return res.status(400).json({ error: "Missing code or invalid WhatsApp number", debug: { query: req.query, state } });
   }
 
   const client_id = process.env.WHOOP_CLIENT_ID;
@@ -31,18 +29,15 @@ export default async function handler(req, res) {
         redirect_uri
       }).toString()
     });
-
     const tokenData = await tokenRes.json();
     if (!tokenData.access_token) {
       return res.status(500).json({ error: "Token exchange failed", debug: tokenData });
     }
-
     // Store in MongoDB
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const collection = db.collection("whoop_tokens");
-
     await collection.updateOne(
       { whatsapp },
       {
@@ -55,12 +50,11 @@ export default async function handler(req, res) {
       },
       { upsert: true }
     );
-
     await mongoClient.close();
-
-    // Redirect back to WhatsApp chat
-    res.redirect("https://wa.me/" + encodeURIComponent("+" + whatsapp));
+    // Redirect back to WhatsApp chat (again, never with +)
+    res.redirect("https://wa.me/" + encodeURIComponent(whatsapp));
   } catch (err) {
+    console.error("OAuth callback failed:", err);
     res.status(500).json({ error: "OAuth callback failed", debug: err.message });
   }
 }
