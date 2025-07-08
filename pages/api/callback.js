@@ -1,3 +1,4 @@
+// /api/callback.js
 import { MongoClient } from 'mongodb';
 import fetch from 'node-fetch';
 
@@ -67,4 +68,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "OAuth callback failed", debug: err.message });
   }
 }
-
