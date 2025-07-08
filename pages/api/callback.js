@@ -4,34 +4,46 @@ import { MongoClient } from 'mongodb';
 import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
-  const code = req.query.code;
-  const state = req.query.state;
+  const { code, state } = req.query;
 
-  console.log('[CALLBACK] code:', code);
-  console.log('[CALLBACK] raw state:', state);
+  // Debug: log incoming query params
+  console.log('[CALLBACK] req.query:', req.query);
 
-  // Parse user from state
+  // Debug: show type and raw state
+  console.log('[CALLBACK] typeof state:', typeof state);
+  console.log('[CALLBACK] state value:', state);
+
+  // Try to parse 'user' from state
   let user = null;
-  if (state) {
+  if (typeof state === 'string') {
     try {
       user = new URLSearchParams(state).get('user');
     } catch (err) {
-      console.error('[CALLBACK] URLSearchParams error:', err);
+      console.error('[CALLBACK] URLSearchParams error:', err, 'state:', state);
     }
   }
-
   console.log('[CALLBACK] parsed user:', user);
 
+  // Fail if no code or user
   if (!code || !user) {
-    return res.status(400).json({ error: "Missing code or user/phone number", debug: { code, state, user } });
+    return res.status(400).json({
+      error: "Missing code or user/phone number in callback",
+      debug: {
+        code,
+        state,
+        parsed_user: user,
+        query: req.query
+      }
+    });
   }
 
+  // Credentials
   const client_id = process.env.WHOOP_CLIENT_ID;
   const client_secret = process.env.WHOOP_CLIENT_SECRET;
   const redirect_uri = process.env.WHOOP_REDIRECT_URI;
 
   try {
-    // Exchange code for access token
+    // Exchange code for token
     const tokenRes = await fetch("https://api.prod.whoop.com/oauth/oauth2/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -48,7 +60,10 @@ export default async function handler(req, res) {
     console.log('[CALLBACK] tokenData:', tokenData);
 
     if (!tokenData.access_token) {
-      return res.status(500).json({ error: "Token exchange failed", debug: tokenData });
+      return res.status(500).json({
+        error: "Token exchange failed (no access_token)",
+        debug: tokenData
+      });
     }
 
     // Store in MongoDB
@@ -64,7 +79,7 @@ export default async function handler(req, res) {
           user,
           ...tokenData,
           created_at: new Date(),
-          expires_at: new Date(Date.now() + tokenData.expires_in * 1000)
+          expires_at: new Date(Date.now() + (tokenData.expires_in || 3600) * 1000)
         }
       },
       { upsert: true }
@@ -72,10 +87,13 @@ export default async function handler(req, res) {
 
     await mongoClient.close();
 
-    // Redirect back to WhatsApp chat or success page
+    // Redirect back to WhatsApp or success page (edit as needed)
     res.redirect("https://wa.me/" + encodeURIComponent(user));
   } catch (err) {
     console.error("OAuth callback failed:", err);
-    res.status(500).json({ error: "OAuth callback failed", debug: err.message });
+    res.status(500).json({
+      error: "OAuth callback failed",
+      debug: err.message
+    });
   }
 }
