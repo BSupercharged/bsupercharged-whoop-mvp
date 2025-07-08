@@ -7,7 +7,6 @@ export default async function handler(req, res) {
   let mongoClient;
   try {
     const { Body, From } = req.body;
-    // Extract digits only (matching your saved key)
     const phone = From.replace(/\D/g, '');
 
     console.log("[WhatsApp] Incoming from:", From, "Digits:", phone);
@@ -18,7 +17,6 @@ export default async function handler(req, res) {
     const db = mongoClient.db("whoop_mvp");
     const tokens = db.collection("whoop_tokens");
 
-    // Find user by digits-only phone
     let user = await tokens.findOne({ whatsapp: phone });
     console.log("[MongoDB] User found?", !!user);
 
@@ -69,7 +67,7 @@ export default async function handler(req, res) {
           return res.status(200).send("Login link sent after no refresh");
         }
       } else {
-        throw err; // Other errors, rethrow
+        throw err; // Other errors, rethrow to be caught below
       }
     }
 
@@ -83,8 +81,22 @@ export default async function handler(req, res) {
     res.status(200).send("Response sent");
   } catch (err) {
     console.error("Error in WhatsApp handler:", err);
+
+    // Attempt to notify user of error if possible
+    if (req.body && req.body.From) {
+      try {
+        await sendWhatsApp(
+          "❗️Sorry, something went wrong. Please try again or re-login to WHOOP.",
+          req.body.From
+        );
+      } catch (err2) {
+        // Ignore further Twilio errors here
+      }
+    }
+
     if (mongoClient) await mongoClient.close();
-    res.status(500).send("Internal error");
+    // Always respond 200 to Twilio to avoid 11200 errors
+    res.status(200).send("Internal error");
   }
 }
 
@@ -101,8 +113,7 @@ async function getGPTReply(message) {
       { role: "user", content: message },
     ],
   });
-  // Truncate if message is too long for WhatsApp/Twilio (max 1600 chars)
-  return chat.choices[0].message.content.trim().slice(0, 1500);
+  return chat.choices[0].message.content.trim().slice(0, 1500); // WhatsApp max
 }
 
 async function sendWhatsApp(text, to) {
@@ -153,3 +164,4 @@ async function refreshWhoopToken(refresh_token) {
   if (!res.ok) throw new Error(`WHOOP token refresh failed: ${res.status} - ${await res.text()}`);
   return await res.json();
 }
+
