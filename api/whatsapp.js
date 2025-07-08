@@ -6,21 +6,19 @@ import fetch from 'node-fetch';
 export default async function handler(req, res) {
   try {
     const { Body, From } = req.body;
-    const phone = From.replace("whatsapp:", ""); // e.g., +316...
-
-    console.log(`[WhatsApp] Incoming message from: ${From}`);
-    console.log(`[WhatsApp] Message body: ${Body}`);
+    // Get last 9 digits for matching
+    const phone = From.replace(/[^\d]/g, '').slice(-9);
 
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const tokens = db.collection("whoop_tokens");
 
-    const user = await tokens.findOne({ whatsapp: phone });
-    console.log("[MongoDB] User found?", !!user);
+    const user = await tokens.findOne({ phone });
 
     if (!user || !user.access_token) {
-      const loginLink = `${process.env.BASE_URL}/login-redirect?whatsapp=${encodeURIComponent(phone)}`;
+      // You could send a login link if desired
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
         `👋 To get started, connect your WHOOP account:\n👉 ${loginLink}`,
         From
@@ -31,8 +29,10 @@ export default async function handler(req, res) {
 
     // Logged in, fetch recovery data
     const recovery = await getLatestWhoopRecovery(user.access_token);
-    const gptPrompt = `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. Give a concise summary and one recommendation.`;
-    const message = await getGPTReply(gptPrompt);
+
+    const message = await getGPTReply(
+      `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`
+    );
 
     await sendWhatsApp(message, From);
     await mongoClient.close();
@@ -51,15 +51,12 @@ async function getGPTReply(message) {
       {
         role: "system",
         content:
-          "You are a helpful health assistant. Interpret WHOOP metrics concisely and give 1 clear recommendation.",
+          "You are a helpful health assistant. Interpret WHOOP metrics concisely and give recommendations.",
       },
       { role: "user", content: message },
     ],
   });
-
-  // Truncate to max 1600 characters
-  const fullText = chat.choices[0].message.content.trim();
-  return fullText.length > 1500 ? fullText.slice(0, 1490) + "..." : fullText;
+  return chat.choices[0].message.content.trim();
 }
 
 async function sendWhatsApp(text, to) {
