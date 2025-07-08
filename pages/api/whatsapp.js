@@ -1,5 +1,3 @@
-// pages/api/whatsapp.js
-
 import Twilio from "twilio";
 import { parse } from "querystring";
 import { OpenAI } from "openai";
@@ -33,7 +31,7 @@ export default async function handler(req, res) {
   let cleanedText = "";
   let mediaNote = "";
 
-  // OCR for images and PDFs
+  // --- OCR for images and PDFs ---
   if (NumMedia && Number(NumMedia) > 0) {
     for (let i = 0; i < Number(NumMedia); i++) {
       const mediaType = body[`MediaContentType${i}`];
@@ -64,7 +62,6 @@ export default async function handler(req, res) {
 
   let mongoClient, user = null;
   let pastMarkersSummary = "";
-  let chartRequested = false;
   try {
     mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
@@ -101,8 +98,6 @@ export default async function handler(req, res) {
     }
 
     // --- WHOOP fallback logic ---
-
-    // 1. If user asks for WHOOP but not connected, prompt login (don't call OpenAI)
     const whoopKeywords = [
       "whoop", "recovery", "hrv", "strain", "sleep", "resting heart rate"
     ];
@@ -119,18 +114,45 @@ export default async function handler(req, res) {
       return res.status(200).setHeader("Content-Type", "text/plain").end();
     }
 
-    // 2. If user has token, but token is expired/invalid (401), prompt login and clear token
-    let whoop = null;
-    let whoopError = null;
+    // --- WHOOP Data Fetch (full context!) ---
+    let whoopProfile = null, whoopProfileErr = false;
+    let whoopRecovery = null, whoopRecoveryErr = false;
+    let whoopSleep = null, whoopSleepErr = false;
+    let whoopStrain = null, whoopStrainErr = false;
+
     if (user && user.access_token) {
       try {
-        whoop = await fetchWhoop("user/profile/basic", user.access_token);
-        if (whoop.error || whoop.status === 401) whoopError = "expired";
-      } catch (e) {
-        whoopError = "expired";
-      }
+        whoopProfile = await fetchWhoop("user/profile/basic", user.access_token);
+        if (!whoopProfile.user_id) whoopProfileErr = true;
+      } catch { whoopProfileErr = true; }
+
+      const today = new Date();
+      const lastYear = new Date(today); lastYear.setFullYear(today.getFullYear() - 1);
+      const start = lastYear.toISOString().split("T")[0];
+      const end = today.toISOString().split("T")[0];
+
+      try {
+        whoopRecovery = await fetchWhoop(`recovery?start=${start}&end=${end}`, user.access_token);
+        if (!Array.isArray(whoopRecovery.records)) whoopRecoveryErr = true;
+      } catch { whoopRecoveryErr = true; }
+
+      try {
+        whoopSleep = await fetchWhoop(`sleep?start=${start}&end=${end}`, user.access_token);
+        if (!Array.isArray(whoopSleep.records)) whoopSleepErr = true;
+      } catch { whoopSleepErr = true; }
+
+      try {
+        whoopStrain = await fetchWhoop(`workout?start=${start}&end=${end}`, user.access_token);
+        if (!Array.isArray(whoopStrain.records)) whoopStrainErr = true;
+      } catch { whoopStrainErr = true; }
     }
-    if (whoopError === "expired") {
+
+    // If token is invalid/expired
+    if (
+      user &&
+      user.access_token &&
+      (whoopProfileErr || whoopRecoveryErr)
+    ) {
       await tokens.updateOne({ whatsapp: phone }, { $unset: { access_token: "" } });
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
@@ -141,14 +163,18 @@ export default async function handler(req, res) {
       return res.status(200).setHeader("Content-Type", "text/plain").end();
     }
 
-    // Compose OpenAI prompt (all context, but doesn't dump unless asked)
-    let systemPrompt = `You are an advanced, friendly health assistant for biohackers. Use all available context from blood test history, current bloods, and WHOOP metrics. Don't dump data unless asked for details. If you need more info, ask the user for specifics.`;
+    // Compose OpenAI prompt (context-aware)
+    let systemPrompt = `You are an advanced, friendly health assistant for biohackers. Use all available context from blood test history, current bloods, and WHOOP metrics (including up to a year of data if present). Don't dump data unless asked for details. If you need more info, ask the user for specifics.`;
     let userPrompt = `User: "${Body}"\n`;
     if (Object.keys(markers).length) userPrompt += `\nNew blood results: ${JSON.stringify(markers)}`;
     if (pastMarkersSummary) userPrompt += `\nPrevious blood markers:\n${pastMarkersSummary}`;
     if (mediaNote) userPrompt += `\nNote: ${mediaNote}`;
     if (cleanedText && !Object.keys(markers).length) userPrompt += `\nExtracted: ${cleanedText}`;
-    if (whoop && whoop.user_id) userPrompt += `\nWHOOP profile: ${whoop.first_name} ${whoop.last_name}`;
+
+    if (whoopProfile && whoopProfile.user_id) userPrompt += `\nWHOOP profile: ${JSON.stringify(whoopProfile)}`;
+    if (whoopRecovery && whoopRecovery.records) userPrompt += `\nRecent WHOOP recovery (sample): ${JSON.stringify(whoopRecovery.records.slice(0, 5))}`;
+    if (whoopSleep && whoopSleep.records) userPrompt += `\nRecent WHOOP sleep (sample): ${JSON.stringify(whoopSleep.records.slice(0, 3))}`;
+    if (whoopStrain && whoopStrain.records) userPrompt += `\nRecent WHOOP workouts (sample): ${JSON.stringify(whoopStrain.records.slice(0, 2))}`;
 
     let gptResponse = "";
     try {
@@ -236,4 +262,5 @@ async function sendWhatsApp(text, to) {
     body: text,
   });
 }
+
 
