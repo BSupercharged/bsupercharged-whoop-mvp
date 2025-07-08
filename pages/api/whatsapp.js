@@ -3,9 +3,7 @@ import { parse } from "querystring";
 import { OpenAI } from "openai";
 import { MongoClient } from "mongodb";
 import fetch from "node-fetch";
-import Tesseract from "tesseract.js";
 import pdfParse from "pdf-parse";
-import { PDFDocument } from "pdf-lib"; // Add pdf-lib for page images
 
 export const config = { api: { bodyParser: false } };
 
@@ -19,34 +17,28 @@ export default async function handler(req, res) {
 
   const { From, Body, NumMedia } = body;
   const phone = (From || "").replace("whatsapp:", "").replace("+", "");
-  let mediaNote = "", ocrResult = "";
+  let pdfResult = "";
+  let mediaMessage = "";
 
-  // --- 1. OCR for images & PDFs ---
+  // --- 1. PDF-only uploads ---
   if (NumMedia && Number(NumMedia) > 0) {
     for (let i = 0; i < Number(NumMedia); i++) {
       const mediaType = body[`MediaContentType${i}`];
       const mediaUrl = body[`MediaUrl${i}`];
-      if (mediaType && mediaType.startsWith("image/")) {
+      if (mediaType === "application/pdf") {
         try {
-          const ocrText = await fetchAndOcrImage(mediaUrl);
-          ocrResult += `OCR result: "${ocrText.slice(0, 350)}"${ocrText.length > 350 ? '...' : ''}\n`;
+          pdfResult += await fetchAndParsePDF(mediaUrl);
         } catch (err) {
-          ocrResult += `Could not process the image for OCR.\n`;
+          pdfResult += `Could not process the PDF. (${err.message})\n`;
         }
-      } else if (mediaType === "application/pdf") {
-        try {
-          ocrResult += await smartPDFExtract(mediaUrl);
-        } catch (err) {
-          ocrResult += `Could not process the PDF. (${err.message})\n`;
-        }
-      } else {
-        mediaNote += `Received media file ${i + 1}: ${mediaUrl} (type: ${mediaType})\n`;
+      } else if (mediaType && mediaType.startsWith("image/")) {
+        mediaMessage += `Image received, but this assistant can't read images. If you have blood results or similar, please send them as a PDF with selectable text.\n`;
       }
     }
   }
 
   // --- 2. Load user context ---
-  let user, latestRecovery = {};
+  let user, whoop = {};
   try {
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
@@ -54,7 +46,6 @@ export default async function handler(req, res) {
     const tokens = db.collection("whoop_tokens");
     user = await tokens.findOne({ whatsapp: phone });
 
-    // Not logged in: send friendly login prompt
     if (!user || !user.access_token) {
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
@@ -64,76 +55,67 @@ export default async function handler(req, res) {
       await mongoClient.close();
       return res.status(200).setHeader("Content-Type", "text/plain").end();
     }
-    try {
-      latestRecovery = await getLatestWhoopRecovery(user.access_token);
-    } catch {}
+
+    // Fetch all WHOOP data for the last year
+    const start = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString();
+    const end = new Date().toISOString();
+    whoop.profile = await fetchWhoop("user/profile/basic", user.access_token);
+    whoop.recovery = await fetchWhoop(`recovery?start=${start}&end=${end}`, user.access_token);
+    whoop.sleep = await fetchWhoop(`sleep?start=${start}&end=${end}`, user.access_token);
+    whoop.workout = await fetchWhoop(`workout?start=${start}&end=${end}`, user.access_token);
+    whoop.body = await fetchWhoop(`body?start=${start}&end=${end}`, user.access_token);
+
     await mongoClient.close();
-  } catch {}
+  } catch (err) {}
 
-  // --- 3. Craft prompt ---
-  // Only include the metrics if the user asks for "details", "show", or similar
-  let bodyLC = (Body || "").toLowerCase();
-  let addWhoopDetails = ["detail", "raw", "show", "data", "numbers", "json"].some(w => bodyLC.includes(w));
-  let whoopSummary = "";
-  if (latestRecovery && Object.keys(latestRecovery).length) {
-    if (addWhoopDetails) {
-      whoopSummary = `WHOOP raw recovery data: ${JSON.stringify(latestRecovery)}\n`;
-    } else {
-      whoopSummary = `Your current metrics: recovery score ${latestRecovery.recovery_score}, HRV ${latestRecovery.hrv}, RHR ${latestRecovery.rhr}, SpO2 ${latestRecovery.spo2}.\n`;
-    }
+  // --- 3. Compose prompt ---
+  let systemPrompt = `You are an advanced health assistant for biohackers. Use context from PDFs (if any) and all available WHOOP data (profile, recovery, sleep, workout, body). Never dump raw data unless the user asks for "details" or "raw".`;
+  let userPrompt = `User: "${Body}"\n`;
+
+  if (pdfResult) userPrompt += `\nPDF: "${pdfResult.slice(0, 900)}"${pdfResult.length > 900 ? '...' : ''}`;
+  if (mediaMessage) userPrompt += `\nNote: ${mediaMessage}`;
+  // Only show summaries, not raw arrays
+  if (whoop && whoop.profile && whoop.profile.user_id) userPrompt += `\nWHOOP profile: ${whoop.profile.first_name} ${whoop.profile.last_name}.`;
+  if (whoop && whoop.recovery && whoop.recovery.records?.length) userPrompt += `\nYou have ${whoop.recovery.records.length} recovery records in the past year.`;
+  if (whoop && whoop.sleep && whoop.sleep.records?.length) userPrompt += `\n${whoop.sleep.records.length} sleep records in the past year.`;
+  if (whoop && whoop.workout && whoop.workout.records?.length) userPrompt += `\n${whoop.workout.records.length} workouts logged.`;
+  if (whoop && whoop.body && whoop.body.records?.length) userPrompt += `\n${whoop.body.records.length} body measurements on file.`;
+  // If user asks for details, add a sample
+  if (Body && /detail|raw|show|data|json/i.test(Body)) {
+    if (whoop.recovery?.records?.length) userPrompt += `\nSample recovery: ${JSON.stringify(whoop.recovery.records[0].score)}`;
+    if (whoop.sleep?.records?.length) userPrompt += `\nSample sleep: ${JSON.stringify(whoop.sleep.records[0].score)}`;
+    if (whoop.workout?.records?.length) userPrompt += `\nSample workout: ${JSON.stringify(whoop.workout.records[0])}`;
+    if (whoop.body?.records?.length) userPrompt += `\nSample body: ${JSON.stringify(whoop.body.records[0])}`;
   }
-
-  // Only mention metrics if relevant or requested
-  let systemPrompt = `You are a friendly but advanced health and biohacking assistant for expert users. Only show metrics if the user asks for details or numbers. Use all available context (OCR, PDF, WHOOP) but keep replies concise and actionable.`;
-  let context = [
-    whoopSummary && addWhoopDetails ? whoopSummary : "", // Only add raw data if requested
-    ocrResult ? `Extracted info: ${ocrResult}` : "",
-    mediaNote ? `Other media: ${mediaNote}` : "",
-    `User: "${Body}"`
-  ].filter(Boolean).join("\n");
-
-  if (!Body || Body.trim().length < 3) {
-    await sendWhatsApp(
-      `Hi! 😊 Can you tell me a bit more, or upload a lab report, supplement list, or ask about your recovery?`,
-      From
-    );
-    return res.status(200).setHeader("Content-Type", "text/plain").end();
-  }
-
-  let prompt = `Context:\n${context}\n\nInstructions:\n- Reply concisely and conversationally.\n- If you can't find useful data or user question is unclear, ask them for more detail or to resend info.\n- Do not repeat all WHOOP metrics unless specifically asked.\n- Use advanced reasoning (e.g. interpret OCR/bloodwork if possible, or ask for a clearer PDF).\n`;
 
   // --- 4. GPT reply ---
   let gptResponse;
   try {
-    gptResponse = await getGPTReply(systemPrompt, prompt);
-    // If GPT tries to paste raw data, trim it out unless user asked for it
-    if (!addWhoopDetails) {
-      gptResponse = gptResponse.replace(/(WHOOP raw recovery data:|{"recovery_score":[^}]+})/gi, "");
-    }
+    gptResponse = await getGPTReply(systemPrompt, userPrompt);
     gptResponse = gptResponse.slice(0, 1600);
   } catch {
-    gptResponse = "Sorry, something went wrong—please try again in a moment!";
+    gptResponse = "Sorry, something went wrong with your question!";
   }
   try { await sendWhatsApp(gptResponse, From); } catch {}
   res.status(200).setHeader("Content-Type", "text/plain").end();
 }
 
-// --- OCR Helpers ---
-async function fetchAndOcrImage(mediaUrl) {
-  const res = await fetch(mediaUrl, {
+// ----- Utility Functions -----
+
+async function fetchWhoop(path, token) {
+  const base = "https://api.prod.whoop.com/developer/v1/";
+  const url = path.startsWith("http") ? path : base + path;
+  const res = await fetch(url, {
     headers: {
-      Authorization: "Basic " + Buffer.from(
-        process.env.TWILIO_ACCOUNT_SID + ":" + process.env.TWILIO_AUTH_TOKEN
-      ).toString("base64"),
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
     },
   });
-  const buffer = await res.buffer();
-  const { data: { text } } = await Tesseract.recognize(buffer, "eng");
-  return text.trim();
+  if (!res.ok) return {};
+  try { return await res.json(); } catch { return {}; }
 }
 
-// --- PDF Helpers: Try text, fallback to OCR per page ---
-async function smartPDFExtract(mediaUrl) {
+async function fetchAndParsePDF(mediaUrl) {
   const res = await fetch(mediaUrl, {
     headers: {
       Authorization: "Basic " + Buffer.from(
@@ -142,26 +124,8 @@ async function smartPDFExtract(mediaUrl) {
     },
   });
   const buffer = await res.buffer();
-
-  // Try to extract text directly
   let parsed = await pdfParse(buffer);
-  if (parsed.text && parsed.text.replace(/\W/g, "").length > 40) {
-    return `PDF text: "${parsed.text.slice(0, 600)}"${parsed.text.length > 600 ? '...' : ''}`;
-  }
-  // If little or no text, try to OCR each page image
-  let textResult = "";
-  try {
-    const pdfDoc = await PDFDocument.load(buffer);
-    for (let i = 0; i < pdfDoc.getPageCount(); i++) {
-      const page = pdfDoc.getPage(i);
-      const png = await page.render({ format: "png" });
-      const ocrText = await Tesseract.recognize(png, "eng");
-      textResult += ocrText.data.text + "\n";
-    }
-    return `OCR from scanned PDF: "${textResult.slice(0, 800)}"${textResult.length > 800 ? '...' : ''}`;
-  } catch (err) {
-    return "Tried to scan PDF pages, but couldn't extract any useful text.";
-  }
+  return parsed.text.trim();
 }
 
 async function getGPTReply(system, userPrompt) {
@@ -183,22 +147,4 @@ async function sendWhatsApp(text, to) {
     to,
     body: text,
   });
-}
-
-async function getLatestWhoopRecovery(token) {
-  const res = await fetch("https://api.prod.whoop.com/developer/v1/recovery", {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
-  });
-  if (!res.ok) throw new Error(`WHOOP API failed: ${res.status} - ${await res.text()}`);
-  const json = await res.json();
-  const latest = json.records?.[0]?.score || {};
-  return {
-    recovery_score: latest.recovery_score || 0,
-    hrv: latest.hrv_rmssd_milli || 0,
-    rhr: latest.resting_heart_rate || 0,
-    spo2: latest.spo2_percentage || 0,
-  };
 }
