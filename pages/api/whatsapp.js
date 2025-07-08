@@ -100,32 +100,48 @@ export default async function handler(req, res) {
       }).join("\n");
     }
 
-    // WHOOP: Always check, reprompt on 401 and remove token
-    let whoop = null;
-    let whoopError = null;
-    if (user && user.access_token) {
-      try {
-        whoop = await fetchWhoop("user/profile/basic", user.access_token);
-        if (whoop.error || whoop.status === 401) {
-          whoopError = "expired";
-        }
-      } catch (e) {
-        whoopError = "expired";
-      }
-    }
+    // --- WHOOP fallback logic ---
 
-    if (whoopError === "expired") {
-      await tokens.updateOne({ whatsapp: phone }, { $unset: { access_token: "" } });
+    // 1. If user asks for WHOOP but not connected, prompt login (don't call OpenAI)
+    const whoopKeywords = [
+      "whoop", "recovery", "hrv", "strain", "sleep", "resting heart rate"
+    ];
+    const wantsWhoop = whoopKeywords.some(k =>
+      (Body || "").toLowerCase().includes(k)
+    );
+    if (wantsWhoop && (!user || !user.access_token)) {
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
-        `🔄 Your WHOOP connection has expired. Please log in again: ${loginLink}`,
+        `🔐 To access your WHOOP data, please log in here:\n${loginLink}`,
         From
       );
       await mongoClient.close();
       return res.status(200).setHeader("Content-Type", "text/plain").end();
     }
 
-    // Compose the OpenAI prompt
+    // 2. If user has token, but token is expired/invalid (401), prompt login and clear token
+    let whoop = null;
+    let whoopError = null;
+    if (user && user.access_token) {
+      try {
+        whoop = await fetchWhoop("user/profile/basic", user.access_token);
+        if (whoop.error || whoop.status === 401) whoopError = "expired";
+      } catch (e) {
+        whoopError = "expired";
+      }
+    }
+    if (whoopError === "expired") {
+      await tokens.updateOne({ whatsapp: phone }, { $unset: { access_token: "" } });
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
+      await sendWhatsApp(
+        `🔄 Your WHOOP connection has expired. Please log in again:\n${loginLink}`,
+        From
+      );
+      await mongoClient.close();
+      return res.status(200).setHeader("Content-Type", "text/plain").end();
+    }
+
+    // Compose OpenAI prompt (all context, but doesn't dump unless asked)
     let systemPrompt = `You are an advanced, friendly health assistant for biohackers. Use all available context from blood test history, current bloods, and WHOOP metrics. Don't dump data unless asked for details. If you need more info, ask the user for specifics.`;
     let userPrompt = `User: "${Body}"\n`;
     if (Object.keys(markers).length) userPrompt += `\nNew blood results: ${JSON.stringify(markers)}`;
@@ -220,3 +236,4 @@ async function sendWhatsApp(text, to) {
     body: text,
   });
 }
+
