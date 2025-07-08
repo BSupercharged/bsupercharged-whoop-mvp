@@ -2,7 +2,8 @@
 
 import { MongoClient } from "mongodb";
 import Twilio from "twilio";
-import { parse } from "querystring"; // Node.js native
+import { parse } from "querystring";
+import { OpenAI } from "openai";
 
 // Disable Next.js built-in bodyParser, so we can parse Twilio's webhooks
 export const config = {
@@ -25,7 +26,7 @@ export default async function handler(req, res) {
   debugLog.push(`[WhatsApp] Body: ${Body}`);
 
   try {
-    const phone = (From || "").replace("whatsapp:", "").replace("+", "");
+    const phone = (From || "").replace("whatsapp:", "").replace("+", "").trim();
     debugLog.push(`[Extracted phone]: ${phone}`);
 
     // Connect to MongoDB
@@ -46,12 +47,13 @@ export default async function handler(req, res) {
       return res.status(200).send("Login link sent");
     }
 
-    // Fallback: Just reply with user info
+    // Use OpenAI for response
+    const gptReply = await getGPTReply(Body);
     await sendWhatsApp(
-      `DEBUG:\n${debugLog.join("\n")}\n\nYou are connected, but not calling WHOOP.`, From
+      `DEBUG:\n${debugLog.join("\n")}\n\n${gptReply}`, From
     );
     await mongoClient.close();
-    res.status(200).send("Replied with debug");
+    res.status(200).send("Replied with debug + GPT");
   } catch (err) {
     debugLog.push(`[ERROR]: ${err?.message}`);
     try {
@@ -70,4 +72,21 @@ async function sendWhatsApp(text, to) {
     to,
     body: text.length > 1500 ? text.slice(0, 1500) : text,
   });
+}
+
+async function getGPTReply(userMsg) {
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const chat = await openai.chat.completions.create({
+    model: "gpt-4o",
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a super-concise, actionable health optimization assistant, replying to a high-performing user who wants quick, scientific, WHOOP-based advice and also mixing in the contextual health data they have provided via whatsapp including pdfs. Use bullet points when possible. No fluff, maximum 100 words per response. Advice can include supplements and food advice. Gloss quickly over the standard stuff.",
+      },
+      { role: "user", content: userMsg || "" }
+    ],
+    max_tokens: 250,
+  });
+  return chat.choices[0]?.message?.content?.trim() || "No reply generated.";
 }
