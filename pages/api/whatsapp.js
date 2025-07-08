@@ -13,18 +13,13 @@ export const config = { api: { bodyParser: false } };
 // ----------- CLEAN OCR TEXT FUNCTION ------------
 function cleanOcrText(text) {
   if (!text) return "";
-  // Insert a space between a marker and a number if missing: LDL-C:4.2 → LDL-C: 4.2
   let out = text.replace(/([A-Za-z\-\+\/]+):([0-9])/g, "$1: $2");
-  // Add space before units if missing (mmol/L, mg/dL, %)
   out = out.replace(/([0-9])([a-zA-Z%\/]+)/g, "$1 $2");
-  // Split markers jammed together: HDL: 1.7LDL: 2.4 → HDL: 1.7\nLDL: 2.4
   out = out.replace(/([0-9]\s*[a-zA-Z%\/]*)\s*([A-Z][A-Za-z\-]+:)/g, "$1\n$2");
-  // Remove duplicate spaces
   out = out.replace(/\s{2,}/g, " ");
   return out;
 }
 
-// ----------- MAIN HANDLER ------------
 export default async function handler(req, res) {
   let rawBody = "";
   await new Promise((resolve) => {
@@ -48,7 +43,6 @@ export default async function handler(req, res) {
         try {
           extractedText += await fetchAndParsePDF(mediaUrl);
         } catch (err) {
-          // Fallback: OCR as image (scanned PDF)
           try { extractedText += await cloudOCR(mediaUrl); }
           catch (err2) { mediaNote += `Could not OCR PDF. (${err2.message})\n`; }
         }
@@ -71,8 +65,9 @@ export default async function handler(req, res) {
     if (m) markers[m[1].replace(/\s+/g,'').replace(/[^A-Za-z0-9\-]/g,'')] = parseFloat(m[2]);
   });
 
-  // -- MongoDB Setup --
   let mongoClient, user = null;
+  let pastMarkersSummary = "";
+  let chartRequested = false;
   try {
     mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
@@ -94,7 +89,21 @@ export default async function handler(req, res) {
       mediaNote += `Blood results saved: ${Object.keys(markers).join(', ')}.\n`;
     }
 
-    // --- Chart reply if asked for a marker ---
+    // Fetch past blood results for summary (up to 10, newest first)
+    const pastBloods = await bloods.find({ whatsapp: phone })
+      .sort({ date: -1 })
+      .limit(10)
+      .toArray();
+    if (pastBloods.length) {
+      pastMarkersSummary = pastBloods.map((r, idx) => {
+        const date = r.date ? new Date(r.date).toISOString().split("T")[0] : "Unknown";
+        const summary = Object.entries(r.markers)
+          .map(([k, v]) => `${k}: ${v}`).join(", ");
+        return `Test ${idx + 1} (${date}): ${summary}`;
+      }).join("\n");
+    }
+
+    // --- Chart reply if asked for a marker trend ---
     const chartMarker = getChartRequestMarker(Body);
     if (chartMarker) {
       const lastResults = await bloods.find({ whatsapp: phone, [`markers.${chartMarker}`]: { $exists: true } })
@@ -102,6 +111,7 @@ export default async function handler(req, res) {
         .limit(10)
         .toArray();
       if (lastResults.length) {
+        chartRequested = true;
         const labels = lastResults.map(r => r.date.toISOString().split('T')[0]).reverse();
         const values = lastResults.map(r => r.markers[chartMarker]).reverse();
         const chartUrl = buildQuickChartUrl(labels, values, chartMarker);
@@ -117,30 +127,51 @@ export default async function handler(req, res) {
       }
     }
 
-    // WHOOP: Try to use, but not required
+    // WHOOP: Try to use, but not required. If expired, prompt to login again.
     let whoop = null;
+    let whoopError = null;
     if (user && user.access_token) {
       try {
         whoop = await fetchWhoop("user/profile/basic", user.access_token);
-      } catch {}
+        if (whoop.error || whoop.status === 401) {
+          whoopError = "expired";
+        }
+      } catch (e) {
+        whoopError = "expired";
+      }
+    }
+
+    if (whoopError === "expired") {
+      // Remove access token from Mongo
+      await tokens.updateOne({ whatsapp: phone }, { $unset: { access_token: "" } });
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
+      await sendWhatsApp(
+        `Your WHOOP connection has expired. Please log in again: ${loginLink}`,
+        From
+      );
+      await mongoClient.close();
+      return res.status(200).setHeader("Content-Type", "text/plain").end();
     }
 
     // Compose GPT prompt
-    let systemPrompt = `You are an advanced and friendly health assistant for biohackers. Use all available context from blood tests (markers, values, trends), uploaded PDF/image text (after fixing spacing), and WHOOP metrics if present. Never dump raw data unless asked for "details". If there is little context, politely ask for more info or suggest what the user might provide.`;
+    let systemPrompt = `You are an advanced, friendly health assistant for biohackers. Use all available context from current and past blood tests, PDF/image text (after fixing spacing), and WHOOP metrics if present. Never dump raw data unless user asks for "details" or "chart". If context is insufficient, politely ask for more info or suggest what the user might provide.`;
     let userPrompt = `User: "${Body}"\n`;
-    if (Object.keys(markers).length) userPrompt += `\nRecent bloods: ${JSON.stringify(markers)}`;
+    if (Object.keys(markers).length) userPrompt += `\nNew blood results: ${JSON.stringify(markers)}`;
+    if (pastMarkersSummary) userPrompt += `\nPrevious blood markers:\n${pastMarkersSummary}`;
     if (mediaNote) userPrompt += `\nNote: ${mediaNote}`;
     if (cleanedText && !Object.keys(markers).length) userPrompt += `\nExtracted: ${cleanedText}`;
     if (whoop && whoop.user_id) userPrompt += `\nWHOOP profile: ${whoop.first_name} ${whoop.last_name}`;
 
     let gptResponse = "";
-    try {
-      gptResponse = await getGPTReply(systemPrompt, userPrompt);
-      gptResponse = gptResponse.slice(0, 1600); // Twilio limit
-    } catch {
-      gptResponse = "Sorry, something went wrong!";
+    if (!chartRequested) {
+      try {
+        gptResponse = await getGPTReply(systemPrompt, userPrompt);
+        gptResponse = gptResponse.slice(0, 1600); // Twilio limit
+      } catch {
+        gptResponse = "Sorry, something went wrong!";
+      }
+      await sendWhatsApp(gptResponse, From);
     }
-    await sendWhatsApp(gptResponse, From);
     await mongoClient.close();
     res.status(200).setHeader("Content-Type", "text/plain").end();
   } catch (err) {
@@ -182,7 +213,6 @@ async function cloudOCR(mediaUrl) {
     },
   });
   const fileBuffer = await fileRes.arrayBuffer();
-
   // OCR.space API: image or PDF
   const ocrRes = await fetch("https://api.ocr.space/parse/image", {
     method: "POST",
@@ -243,5 +273,3 @@ async function sendWhatsApp(text, to, mediaUrl) {
     ...(mediaUrl ? { mediaUrl } : {})
   });
 }
-
-
