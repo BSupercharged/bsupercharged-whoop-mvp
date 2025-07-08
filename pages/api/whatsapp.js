@@ -1,11 +1,6 @@
-// /pages/api/whatsapp.js
-
 import Twilio from "twilio";
 import { parse } from "querystring";
-
-export const config = {
-  api: { bodyParser: false },
-};
+export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
   let rawBody = "";
@@ -15,31 +10,19 @@ export default async function handler(req, res) {
   });
   const body = parse(rawBody);
 
-  const { From, Body, NumMedia } = body;
-  let reply = `👋 Received: "${Body || ""}" from ${From}.`;
-  if (NumMedia && Number(NumMedia) > 0) {
-    reply += `\nMedia detected: ${NumMedia} file(s).\n`;
-    for (let i = 0; i < Number(NumMedia); i++) {
-      reply += `Media${i + 1}: ${body[`MediaUrl${i}`]} (type: ${body[`MediaContentType${i}`]})\n`;
-      // You can fetch/process this file here if you want!
-    }
-  }
-
+  const { From, Body } = body;
   try {
-    await sendWhatsApp(reply.length > 1600 ? reply.slice(0, 1600) : reply, From);
-  } catch (err) {
-    // Optionally log the error, but always reply to Twilio!
+    if (From) {
+      const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+      await client.messages.create({
+        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        to: From,
+        body: `[Echo] Got: "${Body}" from: ${From}`,
+      });
+    }
+  } catch (e) {
+    // Optionally log error, but do nothing else
   }
-
-  // Always send a valid Content-Type and no body to Twilio!
+  // ALWAYS finish with 200 and Content-Type
   res.status(200).setHeader("Content-Type", "text/plain").end();
-}
-
-async function sendWhatsApp(text, to) {
-  const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  await client.messages.create({
-    from: process.env.TWILIO_WHATSAPP_NUMBER,
-    to,
-    body: text,
-  });
 }
