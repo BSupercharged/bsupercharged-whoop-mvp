@@ -5,26 +5,19 @@ export default async function handler(req, res) {
   const code = req.query.code;
   const state = req.query.state;
 
-  console.log('[CALLBACK] code:', code);
-  console.log('[CALLBACK] raw state:', state);
-
   // Parse user from state
   let user = null;
   if (state) {
     try {
+      // state is "user=610451196"
       user = new URLSearchParams(state).get('user');
     } catch (err) {
-      console.error('[CALLBACK] URLSearchParams error:', err);
+      return res.status(400).json({ error: "State param could not be parsed", debug: { state, err: err.message } });
     }
   }
 
-  console.log('[CALLBACK] parsed user:', user);
-
   if (!code || !user) {
-    return res.status(400).json({
-      error: "Missing user (phone) number or code in callback",
-      debug: { code, state, user }
-    });
+    return res.status(400).json({ error: "Missing code or user (phone) number", debug: { code, state, user } });
   }
 
   const client_id = process.env.WHOOP_CLIENT_ID;
@@ -32,6 +25,7 @@ export default async function handler(req, res) {
   const redirect_uri = process.env.WHOOP_REDIRECT_URI;
 
   try {
+    // Exchange code for access token
     const tokenRes = await fetch("https://api.prod.whoop.com/oauth/oauth2/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -45,12 +39,11 @@ export default async function handler(req, res) {
     });
 
     const tokenData = await tokenRes.json();
-    console.log('[CALLBACK] tokenData:', tokenData);
-
     if (!tokenData.access_token) {
       return res.status(500).json({ error: "Token exchange failed", debug: tokenData });
     }
 
+    // Store in MongoDB
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
@@ -71,10 +64,9 @@ export default async function handler(req, res) {
 
     await mongoClient.close();
 
-    // Redirect back to WhatsApp chat or a thank you page
+    // Redirect back to WhatsApp chat or success page
     res.redirect("https://wa.me/" + encodeURIComponent(user));
   } catch (err) {
-    console.error("OAuth callback failed:", err);
     res.status(500).json({ error: "OAuth callback failed", debug: err.message });
   }
 }
