@@ -1,19 +1,23 @@
-import Twilio from "twilio";
+// pages/login.js
+import { useRouter } from "next/router";
+import { useEffect } from "react";
 
-export default async function handler(req, res) {
-  const { From, Body } = req.body;
+export default function Login() {
+  const router = useRouter();
+  const { whatsapp } = router.query;
 
-  // Add your user logic here later
-  try {
-    const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-    await client.messages.create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: From,
-      body: `PONG TEST: ${Body}`,
-    });
-    console.log("Replied to WhatsApp:", From, Body);
-  } catch (e) {
-    console.error("[Twilio send error]", e);
-  }
-  res.status(200).send("pong sent");
+  useEffect(() => {
+    if (whatsapp) {
+      // Redirect to backend login endpoint
+      window.location.href = `/api/login?whatsapp=${encodeURIComponent(whatsapp)}`;
+    }
+  }, [whatsapp]);
+
+  return (
+    <div>
+      <h2>Redirecting you to WHOOP login...</h2>
+      <p>If you are not redirected, <a href={`/api/login?whatsapp=${encodeURIComponent(whatsapp || "")}`}>click here</a>.</p>
+    </div>
+  );
 }
+
