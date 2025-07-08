@@ -5,10 +5,9 @@ import fetch from "node-fetch";
 
 export default async function handler(req, res) {
   let mongoClient;
-  let phone = "";
   try {
     const { Body, From } = req.body;
-    phone = From.replace(/\D/g, '');
+    const phone = From.replace(/\D/g, '');
 
     console.log("[WhatsApp] Incoming from:", From, "Digits:", phone);
     console.log("[WhatsApp] Body:", Body);
@@ -21,23 +20,21 @@ export default async function handler(req, res) {
     let user = await tokens.findOne({ whatsapp: phone });
     console.log("[MongoDB] User found?", !!user);
 
+    // Not logged in, send login link
     if (!user || !user.access_token) {
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
-      await sendWhatsApp(
-        `👋 To get started, connect your WHOOP account:\n👉 ${loginLink}`,
-        From
-      );
+      await sendWhatsApp(`👋 To get started, connect your WHOOP account:\n👉 ${loginLink}`, From);
       await mongoClient.close();
       return res.status(200).send("Login link sent");
     }
 
-    // DOUBLE TRY/CATCH: Handles expired tokens and refresh logic
+    // Try fetching recovery. Handle token expiry/refresh.
     let recovery;
     try {
       recovery = await getLatestWhoopRecovery(user.access_token);
     } catch (err) {
-      console.log("[DEBUG] WHOOP access failed, trying refresh:", err.message);
       if (err.message && err.message.includes("401")) {
+        // Expired token, try refresh
         if (user.refresh_token) {
           try {
             const newTokens = await refreshWhoopToken(user.refresh_token);
@@ -48,7 +45,7 @@ export default async function handler(req, res) {
             user = { ...user, ...newTokens };
             recovery = await getLatestWhoopRecovery(newTokens.access_token);
           } catch (refreshErr) {
-            console.log("[DEBUG] WHOOP token refresh failed:", refreshErr.message);
+            // Refresh failed, prompt login
             const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
             await sendWhatsApp(
               `🔑 Your WHOOP session expired. Please log in again:\n${loginLink}`,
@@ -58,6 +55,7 @@ export default async function handler(req, res) {
             return res.status(200).send("Login link sent after refresh failed");
           }
         } else {
+          // No refresh token, prompt login
           const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
           await sendWhatsApp(
             `🔑 Your WHOOP session expired. Please log in again:\n${loginLink}`,
@@ -67,45 +65,40 @@ export default async function handler(req, res) {
           return res.status(200).send("Login link sent after no refresh");
         }
       } else {
-        // Not a 401 (not expired), send WhatsApp error!
+        // Other errors: send error to WhatsApp and log
         await sendWhatsApp(
-          "❗️Sorry, something went wrong fetching WHOOP data. Please try again.",
+          "❗️Sorry, something went wrong fetching your WHOOP data. Please try again.",
           From
         );
         await mongoClient.close();
-        return res.status(200).send("WHOOP fetch error sent");
+        return res.status(200).send("Error message sent to user");
       }
     }
 
-    // OpenAI analysis & response
+    // If recovery was fetched, use OpenAI for advice and send it back
     const message = await getGPTReply(
       `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`
     );
-
     await sendWhatsApp(message, From);
     await mongoClient.close();
     res.status(200).send("Response sent");
   } catch (err) {
-    console.error("Error in WhatsApp handler:", err);
+    console.error("Error in WhatsApp handler [outer catch]:", err);
 
-    // Attempt to notify user of error if possible
-    try {
-      if (phone) {
+    // Last-chance: try to notify user if possible
+    if (req.body && req.body.From) {
+      try {
         await sendWhatsApp(
           "❗️Sorry, something went wrong. Please try again or re-login to WHOOP.",
-          "whatsapp:+" + phone
+          req.body.From
         );
-      }
-    } catch (err2) {
-      // Ignore further Twilio errors here
+      } catch (err2) { /* do nothing */ }
     }
-
     if (mongoClient) await mongoClient.close();
+    // Always respond 200 to Twilio to avoid 11200 errors
     res.status(200).send("Internal error");
   }
 }
-
-// Helper functions
 
 async function getGPTReply(message) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -120,7 +113,7 @@ async function getGPTReply(message) {
       { role: "user", content: message },
     ],
   });
-  return chat.choices[0].message.content.trim().slice(0, 1500); // WhatsApp max
+  return chat.choices[0].message.content.trim().slice(0, 1500); // WhatsApp/Twilio safe length
 }
 
 async function sendWhatsApp(text, to) {
@@ -171,3 +164,4 @@ async function refreshWhoopToken(refresh_token) {
   if (!res.ok) throw new Error(`WHOOP token refresh failed: ${res.status} - ${await res.text()}`);
   return await res.json();
 }
+
