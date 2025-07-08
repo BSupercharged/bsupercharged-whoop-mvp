@@ -1,78 +1,69 @@
+export const config = {
+  api: { bodyParser: false },
+};
+
 import { MongoClient } from "mongodb";
 import { OpenAI } from "openai";
 import Twilio from "twilio";
 import fetch from "node-fetch";
+import { parse } from "querystring";
 
-// Utility: Always strip + and 'whatsapp:' prefix
-function getDigits(wa) {
-  return wa.replace(/^whatsapp:/, "").replace(/^\+/, "");
+async function parseFormBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", chunk => { data += chunk; });
+    req.on("end", () => resolve(parse(data)));
+    req.on("error", reject);
+  });
 }
 
 export default async function handler(req, res) {
-  try {
-    const { Body, From } = req.body || {};
-    const phoneDigits = getDigits(From || "");
+  const { Body, From } = req.method === "POST"
+    ? await parseFormBody(req)
+    : req.body || {};
 
-    // Vercel logging
-    console.log(`[WhatsApp] Incoming from: ${From} Digits: ${phoneDigits}`);
+  try {
+    const phone = (From || "").replace("whatsapp:", "").replace("+", "");
+    console.log(`[WhatsApp] Incoming from: ${From} Digits: ${phone}`);
     console.log(`[WhatsApp] Body: ${Body}`);
 
-    // Connect to MongoDB
     const mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const tokens = db.collection("whoop_tokens");
-
-    // Look up user by digits
-    const user = await tokens.findOne({ whatsapp: phoneDigits });
+    const user = await tokens.findOne({ whatsapp: phone });
     console.log("[MongoDB] User found?", !!user);
 
-    // If no token/user found, send login link and exit
     if (!user || !user.access_token) {
-      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phoneDigits}`;
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
-        `👋 To use this service, connect your WHOOP account:\n👉 ${loginLink}`,
+        `👋 To get started, connect your WHOOP account:\n👉 ${loginLink}`,
         From
       );
       await mongoClient.close();
-      // Always respond to Twilio so you avoid 11200 errors
-      return res.status(200).send("Login link sent.");
+      return res.status(200).send("Login link sent");
     }
 
-    // Try fetching recovery from WHOOP
-    let recovery;
     try {
-      recovery = await getLatestWhoopRecovery(user.access_token);
-    } catch (err) {
-      // Token probably expired, ask user to login again
-      console.error("WHOOP API error:", err.message);
-      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phoneDigits}`;
+      const recovery = await getLatestWhoopRecovery(user.access_token);
+      const message = await getGPTReply(
+        `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`
+      );
+      await sendWhatsApp(message, From);
+    } catch (whoopErr) {
+      const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
-        `⚠️ WHOOP authentication failed. Please log in again:\n👉 ${loginLink}`,
+        `❗ WHOOP token expired or invalid. Please reconnect your account:\n👉 ${loginLink}`,
         From
       );
-      await mongoClient.close();
-      return res.status(200).send("WHOOP token invalid; login link sent.");
+      console.error("WHOOP API error:", whoopErr);
     }
 
-    // Pass metrics to OpenAI for a chat-based answer
-    const prompt = `My recovery score is ${recovery.recovery_score}, HRV is ${recovery.hrv}, RHR is ${recovery.rhr}, SpO2 is ${recovery.spo2}. What does this mean and what should I do today?`;
-    let message;
-    try {
-      message = await getGPTReply(prompt);
-    } catch (err) {
-      message = "Sorry, AI response failed. Try again later.";
-      console.error("OpenAI error:", err.message);
-    }
-
-    await sendWhatsApp(message, From);
     await mongoClient.close();
-    return res.status(200).send("All good.");
-
+    res.status(200).send("Response sent");
   } catch (err) {
-    console.error("Fatal error in WhatsApp handler:", err);
-    // Always respond something to Twilio to avoid 11200
-    res.status(200).send("Error occurred.");
+    console.error("Error in WhatsApp handler:", err);
+    res.status(500).send("Internal error");
   }
 }
 
@@ -81,11 +72,8 @@ async function getGPTReply(message) {
   const chat = await openai.chat.completions.create({
     model: "gpt-4o",
     messages: [
-      {
-        role: "system",
-        content: "You are a helpful health assistant. Interpret WHOOP metrics concisely and give recommendations.",
-      },
-      { role: "user", content: message },
+      { role: "system", content: "You are a helpful health assistant. Interpret WHOOP metrics concisely and give recommendations." },
+      { role: "user", content: message }
     ],
   });
   return chat.choices[0].message.content.trim();
@@ -96,7 +84,7 @@ async function sendWhatsApp(text, to) {
   await client.messages.create({
     from: process.env.TWILIO_WHATSAPP_NUMBER,
     to,
-    body: text.length > 1600 ? text.slice(0, 1599) : text, // Twilio 1600 char limit!
+    body: text.length > 1500 ? text.slice(0, 1500) : text,
   });
 }
 
@@ -117,5 +105,3 @@ async function getLatestWhoopRecovery(token) {
     spo2: latest.spo2_percentage || 0,
   };
 }
-
-
