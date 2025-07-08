@@ -10,7 +10,6 @@ import FormData from "form-data";
 
 export const config = { api: { bodyParser: false } };
 
-// ----------- CLEAN OCR TEXT FUNCTION ------------
 function cleanOcrText(text) {
   if (!text) return "";
   let out = text.replace(/([A-Za-z\-\+\/]+):([0-9])/g, "$1: $2");
@@ -34,7 +33,7 @@ export default async function handler(req, res) {
   let cleanedText = "";
   let mediaNote = "";
 
-  // -- OCR Logic for files (images/PDFs) --
+  // OCR for images and PDFs
   if (NumMedia && Number(NumMedia) > 0) {
     for (let i = 0; i < Number(NumMedia); i++) {
       const mediaType = body[`MediaContentType${i}`];
@@ -55,10 +54,8 @@ export default async function handler(req, res) {
     }
   }
 
-  // Clean and save the OCR text
+  // Clean and parse markers from OCR text
   cleanedText = cleanOcrText(extractedText);
-
-  // --- Extract blood markers (simple regex for demo) ---
   const markers = {};
   (cleanedText || "").split(/\n/).forEach(line => {
     let m = line.match(/([A-Za-z\(\)\-\+0-9\/ ]{2,15})[: ]+([0-9\.]+)/);
@@ -76,7 +73,7 @@ export default async function handler(req, res) {
     const bloods = db.collection("blood_results");
     user = await tokens.findOne({ whatsapp: phone });
 
-    // Store blood result if any markers found
+    // Save bloods if found
     if (Object.keys(markers).length > 0) {
       await bloods.insertOne({
         whatsapp: phone,
@@ -89,7 +86,7 @@ export default async function handler(req, res) {
       mediaNote += `Blood results saved: ${Object.keys(markers).join(', ')}.\n`;
     }
 
-    // Fetch past blood results for summary (up to 10, newest first)
+    // Get past bloods for summary
     const pastBloods = await bloods.find({ whatsapp: phone })
       .sort({ date: -1 })
       .limit(10)
@@ -103,31 +100,7 @@ export default async function handler(req, res) {
       }).join("\n");
     }
 
-    // --- Chart reply if asked for a marker trend ---
-    const chartMarker = getChartRequestMarker(Body);
-    if (chartMarker) {
-      const lastResults = await bloods.find({ whatsapp: phone, [`markers.${chartMarker}`]: { $exists: true } })
-        .sort({ date: -1 })
-        .limit(10)
-        .toArray();
-      if (lastResults.length) {
-        chartRequested = true;
-        const labels = lastResults.map(r => r.date.toISOString().split('T')[0]).reverse();
-        const values = lastResults.map(r => r.markers[chartMarker]).reverse();
-        const chartUrl = buildQuickChartUrl(labels, values, chartMarker);
-        await sendWhatsApp(
-          `Here's your ${chartMarker} trend for last ${labels.length} blood tests:`,
-          From,
-          chartUrl
-        );
-        await mongoClient.close();
-        return res.status(200).setHeader("Content-Type", "text/plain").end();
-      } else {
-        mediaNote += `No data found for ${chartMarker}.\n`;
-      }
-    }
-
-    // WHOOP: Try to use, but not required. If expired, prompt to login again.
+    // WHOOP: Always check, reprompt on 401 and remove token
     let whoop = null;
     let whoopError = null;
     if (user && user.access_token) {
@@ -142,19 +115,18 @@ export default async function handler(req, res) {
     }
 
     if (whoopError === "expired") {
-      // Remove access token from Mongo
       await tokens.updateOne({ whatsapp: phone }, { $unset: { access_token: "" } });
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await sendWhatsApp(
-        `Your WHOOP connection has expired. Please log in again: ${loginLink}`,
+        `🔄 Your WHOOP connection has expired. Please log in again: ${loginLink}`,
         From
       );
       await mongoClient.close();
       return res.status(200).setHeader("Content-Type", "text/plain").end();
     }
 
-    // Compose GPT prompt
-    let systemPrompt = `You are an advanced, friendly health assistant for biohackers. Use all available context from current and past blood tests, PDF/image text (after fixing spacing), and WHOOP metrics if present. Never dump raw data unless user asks for "details" or "chart". If context is insufficient, politely ask for more info or suggest what the user might provide.`;
+    // Compose the OpenAI prompt
+    let systemPrompt = `You are an advanced, friendly health assistant for biohackers. Use all available context from blood test history, current bloods, and WHOOP metrics. Don't dump data unless asked for details. If you need more info, ask the user for specifics.`;
     let userPrompt = `User: "${Body}"\n`;
     if (Object.keys(markers).length) userPrompt += `\nNew blood results: ${JSON.stringify(markers)}`;
     if (pastMarkersSummary) userPrompt += `\nPrevious blood markers:\n${pastMarkersSummary}`;
@@ -163,15 +135,13 @@ export default async function handler(req, res) {
     if (whoop && whoop.user_id) userPrompt += `\nWHOOP profile: ${whoop.first_name} ${whoop.last_name}`;
 
     let gptResponse = "";
-    if (!chartRequested) {
-      try {
-        gptResponse = await getGPTReply(systemPrompt, userPrompt);
-        gptResponse = gptResponse.slice(0, 1600); // Twilio limit
-      } catch {
-        gptResponse = "Sorry, something went wrong!";
-      }
-      await sendWhatsApp(gptResponse, From);
+    try {
+      gptResponse = await getGPTReply(systemPrompt, userPrompt);
+      gptResponse = gptResponse.slice(0, 1600); // Twilio limit
+    } catch {
+      gptResponse = "Sorry, something went wrong!";
     }
+    await sendWhatsApp(gptResponse, From);
     await mongoClient.close();
     res.status(200).setHeader("Content-Type", "text/plain").end();
   } catch (err) {
@@ -213,7 +183,6 @@ async function cloudOCR(mediaUrl) {
     },
   });
   const fileBuffer = await fileRes.arrayBuffer();
-  // OCR.space API: image or PDF
   const ocrRes = await fetch("https://api.ocr.space/parse/image", {
     method: "POST",
     headers: { apikey: process.env.OCR_SPACE_API_KEY },
@@ -231,27 +200,6 @@ async function cloudOCR(mediaUrl) {
   return result.ParsedResults[0].ParsedText.trim();
 }
 
-function buildQuickChartUrl(dates, values, marker) {
-  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify({
-    type: 'line',
-    data: {
-      labels: dates,
-      datasets: [{
-        label: `${marker} Trend`,
-        data: values
-      }]
-    }
-  }))}`;
-}
-
-function getChartRequestMarker(text) {
-  const possible = ["LDL", "HDL", "ApoB", "Lp(a)", "VitaminD", "Glucose", "Triglycerides", "Ferritin"];
-  for (const marker of possible) {
-    if (text && text.toLowerCase().includes(marker.toLowerCase())) return marker.replace(/[^A-Za-z0-9\-]/g,'');
-  }
-  return null;
-}
-
 async function getGPTReply(system, userPrompt) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const chat = await openai.chat.completions.create({
@@ -264,12 +212,11 @@ async function getGPTReply(system, userPrompt) {
   return chat.choices[0].message.content.trim();
 }
 
-async function sendWhatsApp(text, to, mediaUrl) {
+async function sendWhatsApp(text, to) {
   const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
   await client.messages.create({
     from: process.env.TWILIO_WHATSAPP_NUMBER,
     to,
     body: text,
-    ...(mediaUrl ? { mediaUrl } : {})
   });
 }
