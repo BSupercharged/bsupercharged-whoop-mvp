@@ -1,13 +1,13 @@
-// /pages/api/login.js
-
 export default async function handler(req, res) {
-  const { whatsapp } = req.query;
+  let { whatsapp } = req.query;
+  // Remove any leading '+' and whitespace
+  whatsapp = (whatsapp || '').replace(/^\+/, '').trim();
 
   if (!whatsapp) {
     return res.status(400).json({ error: "Missing WhatsApp number" });
   }
 
-  const state = `user${whatsapp}`;
+  const state = `whatsapp=${encodeURIComponent(whatsapp)}`;
   const redirectUri = encodeURIComponent(process.env.WHOOP_REDIRECT_URI);
   const clientId = process.env.WHOOP_CLIENT_ID;
 
