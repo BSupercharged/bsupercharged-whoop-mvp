@@ -4,6 +4,7 @@ import Twilio from "twilio";
 import fetch from "node-fetch";
 
 export default async function handler(req, res) {
+  let mongoClient;
   try {
     const { Body, From } = req.body;
     // Extract digits only (matching your saved key)
@@ -12,13 +13,13 @@ export default async function handler(req, res) {
     console.log("[WhatsApp] Incoming from:", From, "Digits:", phone);
     console.log("[WhatsApp] Body:", Body);
 
-    const mongoClient = new MongoClient(process.env.MONGODB_URI);
+    mongoClient = new MongoClient(process.env.MONGODB_URI);
     await mongoClient.connect();
     const db = mongoClient.db("whoop_mvp");
     const tokens = db.collection("whoop_tokens");
 
     // Find user by digits-only phone
-    const user = await tokens.findOne({ whatsapp: phone });
+    let user = await tokens.findOne({ whatsapp: phone });
     console.log("[MongoDB] User found?", !!user);
 
     if (!user || !user.access_token) {
@@ -31,8 +32,46 @@ export default async function handler(req, res) {
       return res.status(200).send("Login link sent");
     }
 
-    // Fetch recovery from WHOOP
-    const recovery = await getLatestWhoopRecovery(user.access_token);
+    // Fetch recovery from WHOOP, refresh token if needed
+    let recovery;
+    try {
+      recovery = await getLatestWhoopRecovery(user.access_token);
+    } catch (err) {
+      if (err.message && err.message.includes("401")) {
+        // Try refresh
+        if (user.refresh_token) {
+          try {
+            const newTokens = await refreshWhoopToken(user.refresh_token);
+            await tokens.updateOne(
+              { whatsapp: phone },
+              { $set: { ...newTokens, updated_at: new Date() } }
+            );
+            user = { ...user, ...newTokens }; // update in-memory user object
+            recovery = await getLatestWhoopRecovery(newTokens.access_token);
+          } catch (refreshErr) {
+            // Refresh failed, prompt login
+            const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
+            await sendWhatsApp(
+              `🔑 Your WHOOP session expired. Please log in again:\n${loginLink}`,
+              From
+            );
+            await mongoClient.close();
+            return res.status(200).send("Login link sent after refresh failed");
+          }
+        } else {
+          // No refresh token, prompt login
+          const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
+          await sendWhatsApp(
+            `🔑 Your WHOOP session expired. Please log in again:\n${loginLink}`,
+            From
+          );
+          await mongoClient.close();
+          return res.status(200).send("Login link sent after no refresh");
+        }
+      } else {
+        throw err; // Other errors, rethrow
+      }
+    }
 
     // Ask OpenAI for advice based on the metrics
     const message = await getGPTReply(
@@ -44,6 +83,7 @@ export default async function handler(req, res) {
     res.status(200).send("Response sent");
   } catch (err) {
     console.error("Error in WhatsApp handler:", err);
+    if (mongoClient) await mongoClient.close();
     res.status(500).send("Internal error");
   }
 }
@@ -93,4 +133,23 @@ async function getLatestWhoopRecovery(token) {
     rhr: latest.resting_heart_rate || 0,
     spo2: latest.spo2_percentage || 0,
   };
+}
+
+async function refreshWhoopToken(refresh_token) {
+  const client_id = process.env.WHOOP_CLIENT_ID;
+  const client_secret = process.env.WHOOP_CLIENT_SECRET;
+  const redirect_uri = process.env.WHOOP_REDIRECT_URI;
+  const res = await fetch("https://api.prod.whoop.com/oauth/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token,
+      client_id,
+      client_secret,
+      redirect_uri
+    }).toString()
+  });
+  if (!res.ok) throw new Error(`WHOOP token refresh failed: ${res.status} - ${await res.text()}`);
+  return await res.json();
 }
