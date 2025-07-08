@@ -20,34 +20,38 @@ export default async function handler(req, res) {
     let user = await tokens.findOne({ whatsapp: phone });
     console.log("[MongoDB] User found?", !!user);
 
-    // Not logged in or no access_token: send login link
     if (!user || !user.access_token) {
       const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
       await safeSendWhatsApp(`👋 To get started, connect your WHOOP account:\n👉 ${loginLink}`, From);
       await mongoClient.close();
-      return res.status(200).send("Login link sent");
+      res.status(200).send("Login link sent");
+      return;
     }
 
     // Try fetching recovery. If token fails, prompt login again
     let recovery;
+    let loginLink;
     try {
       recovery = await getLatestWhoopRecovery(user.access_token);
     } catch (err) {
+      console.log("[WHOOP] Error:", err.message);
       if (err.message && err.message.includes("401")) {
-        const loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
+        loginLink = `${process.env.BASE_URL}/api/login?whatsapp=${phone}`;
         await safeSendWhatsApp(
           `🔑 Your WHOOP session expired. Please log in again:\n${loginLink}`,
           From
         );
         await mongoClient.close();
-        return res.status(200).send("Login link sent after 401");
+        res.status(200).send("Login link sent after 401");
+        return;
       } else {
         await safeSendWhatsApp(
           "❗️Sorry, something went wrong fetching your WHOOP data. Please try again.",
           From
         );
         await mongoClient.close();
-        return res.status(200).send("Error message sent to user");
+        res.status(200).send("Error message sent to user");
+        return;
       }
     }
 
@@ -58,6 +62,7 @@ export default async function handler(req, res) {
     await safeSendWhatsApp(message, From);
     await mongoClient.close();
     res.status(200).send("Response sent");
+    return;
   } catch (err) {
     console.error("Error in WhatsApp handler [outer catch]:", err);
     if (req.body && req.body.From) {
@@ -69,7 +74,8 @@ export default async function handler(req, res) {
       } catch (err2) {}
     }
     if (mongoClient) await mongoClient.close();
-    res.status(200).send("Internal error");
+    res.status(200).send("Internal error"); // Always return 200!
+    return;
   }
 }
 
